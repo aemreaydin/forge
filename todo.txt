@@ -1,0 +1,2 @@
+* Implement Drop for app and make sure everything is destroyed properly
+* Check out allocations and allocation callbacks
