@@ -1,8 +1,8 @@
 use anyhow::{anyhow, Context};
 use ash::{
     ext, khr, mvk,
-    vk::{self, EXT_DEBUG_UTILS_NAME},
-    Entry, Instance,
+    vk::{self, EXT_DEBUG_UTILS_NAME, KHR_SWAPCHAIN_NAME},
+    Device, Entry, Instance,
 };
 use glfw::{Action, Context as GlfwContext, Key};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
@@ -11,12 +11,14 @@ const VALIDATION_ENABLED: bool = cfg!(debug_assertions);
 const VALIDATION_LAYER: &std::ffi::CStr =
     unsafe { std::ffi::CStr::from_bytes_with_nul_unchecked(b"VK_LAYER_KHRONOS_validation\0") };
 #[cfg(any(target_os = "macos", target_os = "ios"))]
-const MACOS_REQUIRED_EXTENSIONS: &[*const i8] = &[
+const MACOS_REQUIRED_INSTANCE_EXTENSIONS: &[*const i8] = &[
     vk::EXT_METAL_SURFACE_NAME.as_ptr(),
     khr::portability_enumeration::NAME.as_ptr(),
     khr::get_physical_device_properties2::NAME.as_ptr(),
     mvk::macos_surface::NAME.as_ptr(),
 ];
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+const MACOS_REQUIRED_DEVICE_EXTENSIONS: &[*const i8] = &[khr::portability_subset::NAME.as_ptr()];
 
 unsafe extern "system" fn vulkan_debug_callback(
     message_severity: vk::DebugUtilsMessageSeverityFlagsEXT,
@@ -37,7 +39,7 @@ unsafe extern "system" fn vulkan_debug_callback(
     };
 
     let formatted_message = format!(
-        "[{:?}] [{}] ({}): {}",
+        "[{:?}] [{}] ({}): {}\n",
         message_type, message_id_name, callback_data.message_id_number, message
     );
 
@@ -77,7 +79,7 @@ fn create_instance(
 ) -> anyhow::Result<Instance> {
     let app_name = unsafe { std::ffi::CStr::from_bytes_with_nul_unchecked(b"forge\0") };
     let layers = get_required_layers(entry)?;
-    let extensions = get_required_extensions(entry)?;
+    let extensions = get_required_instance_extensions(entry)?;
     let version = unsafe { entry.try_enumerate_instance_version()? }.unwrap_or(vk::API_VERSION_1_0);
 
     let appinfo = vk::ApplicationInfo::default()
@@ -120,7 +122,7 @@ fn create_debug_utils(
     Ok(Some((debug_utils_loader, debug_call_back)))
 }
 
-fn get_required_layers(entry: &Entry) -> Result<Vec<*const i8>, anyhow::Error> {
+fn get_required_layers(entry: &Entry) -> anyhow::Result<Vec<*const i8>> {
     let layer_names = unsafe {
         entry
             .enumerate_instance_layer_properties()?
@@ -138,15 +140,15 @@ fn get_required_layers(entry: &Entry) -> Result<Vec<*const i8>, anyhow::Error> {
     Ok(layers)
 }
 
-fn get_required_extensions(entry: &Entry) -> Result<Vec<*const i8>, anyhow::Error> {
+fn get_required_instance_extensions(entry: &Entry) -> anyhow::Result<Vec<*const i8>> {
     let mut required_extensions = vec![khr::surface::NAME.as_ptr()];
     if VALIDATION_ENABLED {
         required_extensions.push(EXT_DEBUG_UTILS_NAME.as_ptr());
         log::info!("Adding {:?}", EXT_DEBUG_UTILS_NAME);
     }
     #[cfg(any(target_os = "macos", target_os = "ios"))]
-    required_extensions.extend_from_slice(MACOS_REQUIRED_EXTENSIONS);
-    let system_extensions_names = unsafe {
+    required_extensions.extend_from_slice(MACOS_REQUIRED_INSTANCE_EXTENSIONS);
+    let system_extension_names = unsafe {
         entry
             .enumerate_instance_extension_properties(None)?
             .iter()
@@ -155,9 +157,36 @@ fn get_required_extensions(entry: &Entry) -> Result<Vec<*const i8>, anyhow::Erro
     };
     for required_extension in &required_extensions {
         let extension_name = unsafe { std::ffi::CStr::from_ptr(*required_extension) };
-        if !system_extensions_names.contains(&extension_name) {
+        if !system_extension_names.contains(&extension_name) {
             return Err(anyhow!(
                 "extension {} not supported by the system",
+                extension_name.to_string_lossy()
+            ));
+        }
+    }
+    Ok(required_extensions)
+}
+
+fn get_required_device_extensions(
+    instance: &Instance,
+    physical_device: &vk::PhysicalDevice,
+) -> anyhow::Result<Vec<*const i8>> {
+    let mut required_extensions = vec![KHR_SWAPCHAIN_NAME.as_ptr()];
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    required_extensions.extend_from_slice(MACOS_REQUIRED_DEVICE_EXTENSIONS);
+
+    let device_extension_names = unsafe {
+        instance
+            .enumerate_device_extension_properties(*physical_device)?
+            .iter()
+            .map(|extension| std::ffi::CStr::from_ptr(extension.extension_name.as_ptr()))
+            .collect::<Vec<_>>()
+    };
+    for required_extension in &required_extensions {
+        let extension_name = unsafe { std::ffi::CStr::from_ptr(*required_extension) };
+        if !device_extension_names.contains(&extension_name) {
+            return Err(anyhow!(
+                "extension {} not supported by the device",
                 extension_name.to_string_lossy()
             ));
         }
@@ -193,30 +222,101 @@ fn create_surface(
 }
 
 fn create_physical_device(
-    entry: &Entry,
     instance: &Instance,
+    surface_instance_fns: &khr::surface::Instance,
+    surface: vk::SurfaceKHR,
 ) -> anyhow::Result<vk::PhysicalDevice> {
     let physical_devices = unsafe { instance.enumerate_physical_devices()? };
 
-    let surface_loader = khr::surface::Instance::new(entry, instance);
+    let mut selected_device: Option<vk::PhysicalDevice> = None;
     for device in &physical_devices {
         let props = unsafe { instance.get_physical_device_properties(*device) };
-        let features = unsafe { instance.get_physical_device_features(*device) };
-        let is_discrete = props.device_type == vk::PhysicalDeviceType::DISCRETE_GPU;
+        let surface_support = unsafe {
+            surface_instance_fns.get_physical_device_surface_support(*device, 0, surface)?
+        }; // TODO: Queue family index is hardcoded
+           // TODO: These are not being used right now
+        let _features = unsafe { instance.get_physical_device_features(*device) };
+        let _is_discrete = props.device_type == vk::PhysicalDeviceType::DISCRETE_GPU;
 
-        if props.device_type == vk::PhysicalDeviceType::DISCRETE_GPU {
-            log::info!("Using {}", i8_array_to_string(&props.device_name));
-            return Ok(*device);
+        match surface_support {
+            true => {
+                if props.device_type == vk::PhysicalDeviceType::DISCRETE_GPU {
+                    log::info!("Using {}", i8_array_to_string(&props.device_name));
+                    return Ok(*device);
+                } else {
+                    selected_device = Some(*device)
+                }
+            }
+            false => {}
         }
     }
 
-    let first_device = physical_devices
-        .first()
-        .cloned()
-        .context("no suitable physical device found")?;
-    let props = unsafe { instance.get_physical_device_properties(first_device) };
-    log::info!("Using {}", i8_array_to_string(&props.device_name));
-    Ok(first_device)
+    match selected_device {
+        Some(device) => {
+            let props = unsafe { instance.get_physical_device_properties(device) };
+            log::info!("Using {}", i8_array_to_string(&props.device_name));
+            Ok(device)
+        }
+        None => Err(anyhow!("no suitable physical devices found")),
+    }
+}
+
+fn create_device(
+    instance: &Instance,
+    physical_device: &vk::PhysicalDevice,
+) -> anyhow::Result<Device> {
+    let extensions = get_required_device_extensions(instance, physical_device)?;
+    let queue_create_infos = [vk::DeviceQueueCreateInfo {
+        queue_count: 1,
+        queue_family_index: 0,
+        ..Default::default()
+    }
+    .queue_priorities(&[1.0])];
+    let create_info = vk::DeviceCreateInfo::default()
+        .queue_create_infos(&queue_create_infos)
+        .enabled_extension_names(&extensions);
+    Ok(unsafe { instance.create_device(*physical_device, &create_info, None)? })
+}
+
+fn create_swapchain(
+    instance: &Instance,
+    device: &Device,
+    surface: vk::SurfaceKHR,
+    surface_formats: &[vk::SurfaceFormatKHR],
+    width: u32,
+    height: u32,
+) -> anyhow::Result<(khr::swapchain::Device, vk::SwapchainKHR)> {
+    let surface_format = surface_formats
+        .iter()
+        .find(|format| {
+            // TODO: Not the best way to do it
+            !(format.color_space != vk::ColorSpaceKHR::SRGB_NONLINEAR
+                || format.format != vk::Format::R8G8B8A8_SRGB
+                    && format.format != vk::Format::B8G8R8A8_SRGB)
+        })
+        .context("failed to find a suitable surface format")?;
+    let create_info = vk::SwapchainCreateInfoKHR::default()
+        .surface(surface)
+        .min_image_count(3)
+        .image_format(surface_format.format)
+        .image_color_space(surface_format.color_space)
+        .image_array_layers(1)
+        .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
+        .queue_family_indices(&[0])
+        .pre_transform(vk::SurfaceTransformFlagsKHR::IDENTITY)
+        .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
+        .present_mode(vk::PresentModeKHR::FIFO)
+        .image_extent(vk::Extent2D { width, height });
+
+    let swapchain_device_fns = khr::swapchain::Device::new(instance, device);
+    let swapchain = unsafe { swapchain_device_fns.create_swapchain(&create_info, None)? };
+
+    Ok((swapchain_device_fns, swapchain))
+}
+
+fn create_semaphore(device: &Device) -> anyhow::Result<vk::Semaphore> {
+    let create_info = vk::SemaphoreCreateInfo::default();
+    Ok(unsafe { device.create_semaphore(&create_info, None)? })
 }
 
 fn main() -> anyhow::Result<()> {
@@ -252,8 +352,24 @@ fn main() -> anyhow::Result<()> {
     let instance = create_instance(&entry, &mut debug_info)?;
     let debug_handles = create_debug_utils(&entry, &instance, debug_info)?;
 
-    let physical_device = create_physical_device(&entry, &instance)?;
-    let (surface_instance, surface) = create_surface(&entry, &instance, &window)?;
+    let (surface_instance_fns, surface) = create_surface(&entry, &instance, &window)?;
+    let physical_device = create_physical_device(&instance, &surface_instance_fns, surface)?;
+    let surface_formats = unsafe {
+        surface_instance_fns.get_physical_device_surface_formats(physical_device, surface)?
+    };
+
+    let device = create_device(&instance, &physical_device)?;
+    let (swapchain_device_fns, swapchain) = create_swapchain(
+        &instance,
+        &device,
+        surface,
+        &surface_formats,
+        window.get_size().0 as u32,
+        window.get_size().1 as u32,
+    )?;
+
+    let waitSemaphore = create_semaphore(&device)?;
+    let presentSemaphore = create_semaphore(&device)?;
 
     while !window.should_close() {
         glfw.poll_events();
@@ -263,10 +379,16 @@ fn main() -> anyhow::Result<()> {
     }
 
     unsafe {
-        if let Some((debug_instance, debug_callback)) = debug_handles {
-            debug_instance.destroy_debug_utils_messenger(debug_callback, None);
+        device.device_wait_idle()?;
+
+        if let Some((debug_fns, debug_callback)) = debug_handles {
+            debug_fns.destroy_debug_utils_messenger(debug_callback, None);
         }
-        surface_instance.destroy_surface(surface, None);
+        device.destroy_semaphore(waitSemaphore, None);
+        device.destroy_semaphore(presentSemaphore, None);
+        swapchain_device_fns.destroy_swapchain(swapchain, None);
+        surface_instance_fns.destroy_surface(surface, None);
+        device.destroy_device(None);
         instance.destroy_instance(None);
     }
     Ok(())
