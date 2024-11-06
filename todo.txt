@@ -1,3 +1,4 @@
 * Implement Drop for app and make sure everything is destroyed properly
 * Check out allocations and allocation callbacks
 * Check for format and colorspace when creating a swapchain
+* Most places have queue family index hard-coded

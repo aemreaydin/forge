@@ -301,7 +301,7 @@ fn create_swapchain(
         .image_format(surface_format.format)
         .image_color_space(surface_format.color_space)
         .image_array_layers(1)
-        .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
+        .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_DST)
         .queue_family_indices(&[0])
         .pre_transform(vk::SurfaceTransformFlagsKHR::IDENTITY)
         .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
@@ -312,6 +312,14 @@ fn create_swapchain(
     let swapchain = unsafe { swapchain_device_fns.create_swapchain(&create_info, None)? };
 
     Ok((swapchain_device_fns, swapchain))
+}
+
+fn create_command_pool(device: &Device) -> anyhow::Result<vk::CommandPool> {
+    let create_info = vk::CommandPoolCreateInfo::default()
+        .queue_family_index(0)
+        .flags(vk::CommandPoolCreateFlags::TRANSIENT); // TODO: Queue family index hard coded
+
+    Ok(unsafe { device.create_command_pool(&create_info, None)? })
 }
 
 fn create_semaphore(device: &Device) -> anyhow::Result<vk::Semaphore> {
@@ -359,6 +367,7 @@ fn main() -> anyhow::Result<()> {
     };
 
     let device = create_device(&instance, &physical_device)?;
+    let queue = unsafe { device.get_device_queue(0, 0) };
     let (swapchain_device_fns, swapchain) = create_swapchain(
         &instance,
         &device,
@@ -367,15 +376,125 @@ fn main() -> anyhow::Result<()> {
         window.get_size().0 as u32,
         window.get_size().1 as u32,
     )?;
+    let images = unsafe { swapchain_device_fns.get_swapchain_images(swapchain)? };
 
-    let waitSemaphore = create_semaphore(&device)?;
-    let presentSemaphore = create_semaphore(&device)?;
+    let command_pool = create_command_pool(&device)?;
+    let command_buffer_allocate_info = vk::CommandBufferAllocateInfo::default()
+        .command_buffer_count(1)
+        .command_pool(command_pool);
+    let command_buffers =
+        unsafe { device.allocate_command_buffers(&command_buffer_allocate_info)? };
+
+    let acquire_semaphore = create_semaphore(&device)?;
+    let present_semaphore = create_semaphore(&device)?;
 
     while !window.should_close() {
         glfw.poll_events();
         for (_, event) in glfw::flush_messages(&events) {
             handle_window_event(&mut window, event);
         }
+
+        let (image_index, is_suboptimal) = unsafe {
+            swapchain_device_fns.acquire_next_image(
+                swapchain,
+                u64::MAX,
+                acquire_semaphore,
+                vk::Fence::null(),
+            )?
+        };
+
+        unsafe { device.reset_command_pool(command_pool, vk::CommandPoolResetFlags::empty())? }
+
+        let command_buffer = command_buffers[0];
+        let begin_info = vk::CommandBufferBeginInfo::default()
+            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+        unsafe {
+            device.begin_command_buffer(command_buffer, &begin_info)?; // TODO: Command buffer
+            let to_transfer_barrier = vk::ImageMemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::empty())
+                .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .old_layout(vk::ImageLayout::UNDEFINED)
+                .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                .image(images[image_index as usize])
+                .subresource_range(vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                })
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED);
+
+            device.cmd_pipeline_barrier(
+                command_buffer,
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[to_transfer_barrier],
+            );
+
+            let subresource_range = vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            };
+            device.cmd_clear_color_image(
+                command_buffer,
+                images[image_index as usize],
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                &vk::ClearColorValue {
+                    float32: [1.0, 1.0, 0.0, 1.0],
+                },
+                &[subresource_range],
+            );
+            let to_present_barrier = vk::ImageMemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .dst_access_mask(vk::AccessFlags::empty())
+                .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                .new_layout(vk::ImageLayout::PRESENT_SRC_KHR) // For presenting
+                .image(images[image_index as usize])
+                .subresource_range(subresource_range)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED);
+
+            device.cmd_pipeline_barrier(
+                command_buffer,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[to_present_barrier],
+            );
+
+            device.end_command_buffer(command_buffer)?;
+
+            let cmds = &[command_buffer];
+            let waits = &[acquire_semaphore];
+            let presents = &[present_semaphore];
+            let images = &[image_index];
+            let stage_flags = &[vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
+            let submit_info = vk::SubmitInfo::default()
+                .command_buffers(cmds)
+                .wait_semaphores(waits)
+                .signal_semaphores(presents)
+                .wait_dst_stage_mask(stage_flags);
+            device.queue_submit(queue, &[submit_info], vk::Fence::null())?;
+
+            let swapchains = &[swapchain];
+            let present_info = vk::PresentInfoKHR::default()
+                .image_indices(images)
+                .swapchains(swapchains)
+                .wait_semaphores(presents);
+            swapchain_device_fns.queue_present(queue, &present_info)?;
+
+            device.device_wait_idle()?;
+        };
     }
 
     unsafe {
@@ -384,8 +503,11 @@ fn main() -> anyhow::Result<()> {
         if let Some((debug_fns, debug_callback)) = debug_handles {
             debug_fns.destroy_debug_utils_messenger(debug_callback, None);
         }
-        device.destroy_semaphore(waitSemaphore, None);
-        device.destroy_semaphore(presentSemaphore, None);
+        device.destroy_semaphore(acquire_semaphore, None);
+        device.destroy_semaphore(present_semaphore, None);
+
+        device.free_command_buffers(command_pool, &command_buffers);
+        device.destroy_command_pool(command_pool, None);
         swapchain_device_fns.destroy_swapchain(swapchain, None);
         surface_instance_fns.destroy_surface(surface, None);
         device.destroy_device(None);
