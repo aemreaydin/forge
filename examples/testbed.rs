@@ -39,7 +39,7 @@ unsafe extern "system" fn vulkan_debug_callback(
     };
 
     let formatted_message = format!(
-        "[{:?}] [{}] ({}): {}\n",
+        "\n[{:?}] [{}] ({}): {}\n",
         message_type, message_id_name, callback_data.message_id_number, message
     );
 
@@ -278,28 +278,38 @@ fn create_device(
     Ok(unsafe { instance.create_device(*physical_device, &create_info, None)? })
 }
 
-fn create_swapchain(
-    instance: &Instance,
-    device: &Device,
+fn get_suitable_format(
+    physical_device: vk::PhysicalDevice,
     surface: vk::SurfaceKHR,
-    surface_formats: &[vk::SurfaceFormatKHR],
-    width: u32,
-    height: u32,
-) -> anyhow::Result<(khr::swapchain::Device, vk::SwapchainKHR)> {
-    let surface_format = surface_formats
-        .iter()
+    surface_instance_fns: &khr::surface::Instance,
+) -> anyhow::Result<vk::SurfaceFormatKHR> {
+    let surface_formats = unsafe {
+        surface_instance_fns.get_physical_device_surface_formats(physical_device, surface)
+    }?;
+    surface_formats
+        .into_iter()
         .find(|format| {
             // TODO: Not the best way to do it
             !(format.color_space != vk::ColorSpaceKHR::SRGB_NONLINEAR
                 || format.format != vk::Format::R8G8B8A8_SRGB
                     && format.format != vk::Format::B8G8R8A8_SRGB)
         })
-        .context("failed to find a suitable surface format")?;
+        .context("failed to find a suitable surface format")
+}
+
+fn create_swapchain(
+    instance: &Instance,
+    device: &Device,
+    surface: vk::SurfaceKHR,
+    format: vk::SurfaceFormatKHR,
+    width: u32,
+    height: u32,
+) -> anyhow::Result<(khr::swapchain::Device, vk::SwapchainKHR)> {
     let create_info = vk::SwapchainCreateInfoKHR::default()
         .surface(surface)
         .min_image_count(3)
-        .image_format(surface_format.format)
-        .image_color_space(surface_format.color_space)
+        .image_format(format.format)
+        .image_color_space(format.color_space)
         .image_array_layers(1)
         .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_DST)
         .queue_family_indices(&[0])
@@ -327,9 +337,41 @@ fn create_semaphore(device: &Device) -> anyhow::Result<vk::Semaphore> {
     Ok(unsafe { device.create_semaphore(&create_info, None)? })
 }
 
-fn main() -> anyhow::Result<()> {
-    env_logger::init();
+fn create_render_pass(device: &Device, format: vk::Format) -> anyhow::Result<vk::RenderPass> {
+    let color_desc = vk::AttachmentDescription::default()
+        .format(format)
+        .samples(vk::SampleCountFlags::TYPE_1)
+        .load_op(vk::AttachmentLoadOp::CLEAR)
+        .store_op(vk::AttachmentStoreOp::STORE)
+        .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+        .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+        .initial_layout(vk::ImageLayout::UNDEFINED)
+        .final_layout(vk::ImageLayout::PRESENT_SRC_KHR);
+    let descs = &[color_desc];
 
+    let color_ref = vk::AttachmentReference::default()
+        .attachment(0)
+        .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
+    let refs = &[color_ref];
+
+    let color_subpass = vk::SubpassDescription::default()
+        .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
+        .color_attachments(refs);
+    let subpasses = &[color_subpass];
+
+    let create_info = vk::RenderPassCreateInfo::default()
+        .attachments(descs)
+        .subpasses(subpasses);
+
+    Ok(unsafe { device.create_render_pass(&create_info, None) }?)
+}
+
+fn main() -> anyhow::Result<()> {
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
+        .format_target(false)
+        .format_indent(None)
+        .format_timestamp_nanos()
+        .init();
     let mut glfw = glfw::init_no_callbacks()?;
     let (mut window, events) = glfw
         .create_window(1920, 1080, "forge", glfw::WindowMode::Windowed)
@@ -362,21 +404,22 @@ fn main() -> anyhow::Result<()> {
 
     let (surface_instance_fns, surface) = create_surface(&entry, &instance, &window)?;
     let physical_device = create_physical_device(&instance, &surface_instance_fns, surface)?;
-    let surface_formats = unsafe {
-        surface_instance_fns.get_physical_device_surface_formats(physical_device, surface)?
-    };
+    let format = get_suitable_format(physical_device, surface, &surface_instance_fns)?;
 
     let device = create_device(&instance, &physical_device)?;
     let queue = unsafe { device.get_device_queue(0, 0) };
+
     let (swapchain_device_fns, swapchain) = create_swapchain(
         &instance,
         &device,
         surface,
-        &surface_formats,
+        format,
         window.get_size().0 as u32,
         window.get_size().1 as u32,
     )?;
     let images = unsafe { swapchain_device_fns.get_swapchain_images(swapchain)? };
+
+    let render_pass = create_render_pass(&device, format.format)?;
 
     let command_pool = create_command_pool(&device)?;
     let command_buffer_allocate_info = vk::CommandBufferAllocateInfo::default()
@@ -500,17 +543,20 @@ fn main() -> anyhow::Result<()> {
     unsafe {
         device.device_wait_idle()?;
 
-        if let Some((debug_fns, debug_callback)) = debug_handles {
-            debug_fns.destroy_debug_utils_messenger(debug_callback, None);
-        }
         device.destroy_semaphore(acquire_semaphore, None);
         device.destroy_semaphore(present_semaphore, None);
 
         device.free_command_buffers(command_pool, &command_buffers);
         device.destroy_command_pool(command_pool, None);
+
+        device.destroy_render_pass(render_pass, None);
         swapchain_device_fns.destroy_swapchain(swapchain, None);
         surface_instance_fns.destroy_surface(surface, None);
         device.destroy_device(None);
+
+        if let Some((debug_fns, debug_callback)) = debug_handles {
+            debug_fns.destroy_debug_utils_messenger(debug_callback, None);
+        }
         instance.destroy_instance(None);
     }
     Ok(())
