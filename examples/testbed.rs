@@ -6,6 +6,7 @@ use ash::{
 };
 use glfw::{Action, Context as GlfwContext, Key};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
+use std::path::Path;
 
 const VALIDATION_ENABLED: bool = cfg!(debug_assertions);
 const VALIDATION_LAYER: &std::ffi::CStr =
@@ -18,7 +19,10 @@ const MACOS_REQUIRED_INSTANCE_EXTENSIONS: &[*const i8] = &[
     mvk::macos_surface::NAME.as_ptr(),
 ];
 #[cfg(any(target_os = "macos", target_os = "ios"))]
-const MACOS_REQUIRED_DEVICE_EXTENSIONS: &[*const i8] = &[khr::portability_subset::NAME.as_ptr()];
+const MACOS_REQUIRED_DEVICE_EXTENSIONS: &[*const i8] = &[
+    khr::portability_subset::NAME.as_ptr(),
+    // ext::shader_object::NAME.as_ptr(), TODO: Macos doesn't support this just yet
+]; // TODO: Make this a setting in the application
 
 unsafe extern "system" fn vulkan_debug_callback(
     message_severity: vk::DebugUtilsMessageSeverityFlagsEXT,
@@ -284,8 +288,8 @@ fn get_suitable_format(
     surface_instance_fns: &khr::surface::Instance,
 ) -> anyhow::Result<vk::SurfaceFormatKHR> {
     let surface_formats = unsafe {
-        surface_instance_fns.get_physical_device_surface_formats(physical_device, surface)
-    }?;
+        surface_instance_fns.get_physical_device_surface_formats(physical_device, surface)?
+    };
     surface_formats
         .into_iter()
         .find(|format| {
@@ -363,8 +367,187 @@ fn create_render_pass(device: &Device, format: vk::Format) -> anyhow::Result<vk:
         .attachments(descs)
         .subpasses(subpasses);
 
-    Ok(unsafe { device.create_render_pass(&create_info, None) }?)
+    Ok(unsafe { device.create_render_pass(&create_info, None)? })
 }
+
+fn create_image_view(
+    device: &Device,
+    image: vk::Image,
+    format: vk::Format,
+) -> anyhow::Result<vk::ImageView> {
+    let create_info = vk::ImageViewCreateInfo::default()
+        .image(image)
+        .view_type(vk::ImageViewType::TYPE_2D)
+        .format(format)
+        .components(
+            vk::ComponentMapping::default()
+                .r(vk::ComponentSwizzle::IDENTITY)
+                .g(vk::ComponentSwizzle::IDENTITY)
+                .b(vk::ComponentSwizzle::IDENTITY)
+                .a(vk::ComponentSwizzle::IDENTITY),
+        )
+        .subresource_range(vk::ImageSubresourceRange {
+            aspect_mask: vk::ImageAspectFlags::COLOR,
+            base_mip_level: 0,
+            level_count: 1,
+            base_array_layer: 0,
+            layer_count: 1,
+        });
+    Ok(unsafe { device.create_image_view(&create_info, None)? })
+}
+
+fn create_framebuffer(
+    device: &Device,
+    render_pass: vk::RenderPass,
+    image_view: vk::ImageView,
+    width: u32,
+    height: u32,
+) -> anyhow::Result<vk::Framebuffer> {
+    let attachments = &[image_view];
+    let create_info = vk::FramebufferCreateInfo::default()
+        .render_pass(render_pass)
+        .width(width)
+        .height(height)
+        .layers(1)
+        .attachments(attachments);
+    Ok(unsafe { device.create_framebuffer(&create_info, None)? })
+}
+
+fn load_shader<P: AsRef<Path>>(path: P) -> anyhow::Result<Vec<u32>> {
+    let bytes = std::fs::read(path)?;
+    Ok(bytemuck::try_cast_slice::<u8, u32>(&bytes)?.to_vec())
+}
+
+fn create_shader_module<P: AsRef<Path>>(
+    device: &Device,
+    path: P,
+) -> anyhow::Result<vk::ShaderModule> {
+    let shader_code = load_shader(path)?;
+    let create_info = vk::ShaderModuleCreateInfo::default().code(&shader_code);
+    Ok(unsafe { device.create_shader_module(&create_info, None)? })
+}
+
+fn create_graphics_pipeline(
+    device: &Device,
+    render_pass: vk::RenderPass,
+    pipeline_layout: vk::PipelineLayout,
+    vert_module: vk::ShaderModule,
+    frag_module: vk::ShaderModule,
+) -> anyhow::Result<vk::Pipeline> {
+    let name = unsafe { std::ffi::CStr::from_bytes_with_nul_unchecked(b"main\0") };
+    let stages = &[
+        vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::VERTEX)
+            .module(vert_module)
+            .name(name),
+        vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::FRAGMENT)
+            .module(frag_module)
+            .name(name),
+    ];
+    let vertex_state = vk::PipelineVertexInputStateCreateInfo::default();
+    let input_assembly_state = vk::PipelineInputAssemblyStateCreateInfo::default()
+        .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
+    let tesselation_state = vk::PipelineTessellationStateCreateInfo::default();
+    let multisample_state = vk::PipelineMultisampleStateCreateInfo::default()
+        .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+    let depth_stencil_state = vk::PipelineDepthStencilStateCreateInfo::default();
+
+    let color_attachment_states = &[vk::PipelineColorBlendAttachmentState::default()
+        .color_write_mask(
+            vk::ColorComponentFlags::R
+                | vk::ColorComponentFlags::G
+                | vk::ColorComponentFlags::B
+                | vk::ColorComponentFlags::A,
+        )];
+    let color_blend_state =
+        vk::PipelineColorBlendStateCreateInfo::default().attachments(color_attachment_states);
+
+    let rasterization_state = vk::PipelineRasterizationStateCreateInfo::default()
+        .line_width(1.0)
+        .front_face(vk::FrontFace::CLOCKWISE);
+
+    let viewport_state = vk::PipelineViewportStateCreateInfo::default()
+        .viewport_count(1)
+        .scissor_count(1);
+
+    let dyn_states = &[vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+    let dynamic_state = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(dyn_states);
+    let create_info = vk::GraphicsPipelineCreateInfo::default()
+        .stages(stages)
+        .vertex_input_state(&vertex_state)
+        .input_assembly_state(&input_assembly_state)
+        .tessellation_state(&tesselation_state)
+        .multisample_state(&multisample_state)
+        .depth_stencil_state(&depth_stencil_state)
+        .color_blend_state(&color_blend_state)
+        .rasterization_state(&rasterization_state)
+        .viewport_state(&viewport_state)
+        .dynamic_state(&dynamic_state)
+        .render_pass(render_pass)
+        .layout(pipeline_layout)
+        .subpass(0);
+
+    // pub layout: PipelineLayout,
+    // pub render_pass: RenderPass,
+    // pub subpass: u32,
+
+    // TODO: Add pipelinecache
+    unsafe {
+        let pipeline_res =
+            device.create_graphics_pipelines(vk::PipelineCache::null(), &[create_info], None);
+
+        let pipeline = match pipeline_res {
+            Ok(pipelines) => pipelines
+                .first()
+                .cloned()
+                .context("failed to get a graphics pipeline"),
+            Err((_, vk_result)) => Err(anyhow!(
+                "failed to create pipeline with error {}",
+                vk_result
+            )),
+        }?;
+
+        device.destroy_shader_module(vert_module, None);
+        device.destroy_shader_module(frag_module, None);
+        Ok(pipeline)
+    }
+}
+
+fn create_pipeline_layout(device: &Device) -> anyhow::Result<vk::PipelineLayout> {
+    let create_info = vk::PipelineLayoutCreateInfo::default();
+    Ok(unsafe { device.create_pipeline_layout(&create_info, None)? })
+}
+// TODO: Macos doesn't support this but keep it for the future
+// fn create_shader_object<P: AsRef<Path>>(
+//     shader_object_device_fns: &ext::shader_object::Device,
+//     shader_path: P,
+//     shader_stage_flags: vk::ShaderStageFlags,
+// ) -> anyhow::Result<vk::ShaderEXT> {
+//     let vert_code = load_shader(shader_path)?;
+//     let name = unsafe { std::ffi::CStr::from_bytes_with_nul_unchecked(b"main\0") };
+//     let vert_create_info = vk::ShaderCreateInfoEXT::default()
+//         .stage(shader_stage_flags)
+//         .code_type(vk::ShaderCodeTypeEXT::BINARY)
+//         .code(&vert_code)
+//         .name(name);
+//     // pub next_stage: ShaderStageFlags,
+//     let shader_res = unsafe { shader_object_device_fns.create_shaders(&[vert_create_info], None) };
+//     shader_res
+//         .map(|shaders| {
+//             shaders
+//                 .first()
+//                 .cloned()
+//                 .context("vkCreateShadersEXT failed to return a shader")
+//         })
+//         .map_err(|(_, result)| {
+//             anyhow!(
+//                 "shader creation in {:?} failed with {}",
+//                 shader_stage_flags,
+//                 result
+//             )
+//         })?
+// }
 
 fn main() -> anyhow::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
@@ -378,6 +561,8 @@ fn main() -> anyhow::Result<()> {
         .context("failed to create a glfw window")?;
     window.set_key_polling(true);
     window.make_current();
+    let (window_width, window_height) = window.get_size();
+    let (window_width, window_height) = (window_width as u32, window_height as u32);
 
     let entry = unsafe { Entry::load()? };
 
@@ -414,12 +599,37 @@ fn main() -> anyhow::Result<()> {
         &device,
         surface,
         format,
-        window.get_size().0 as u32,
-        window.get_size().1 as u32,
+        window_width,
+        window_height,
     )?;
-    let images = unsafe { swapchain_device_fns.get_swapchain_images(swapchain)? };
 
+    let images = unsafe { swapchain_device_fns.get_swapchain_images(swapchain)? };
     let render_pass = create_render_pass(&device, format.format)?;
+
+    let mut image_views = Vec::with_capacity(images.len());
+    let mut framebuffers = Vec::with_capacity(images.len());
+    for (ind, image) in images.iter().enumerate() {
+        image_views.push(create_image_view(&device, *image, format.format)?);
+        framebuffers.push(create_framebuffer(
+            &device,
+            render_pass,
+            image_views[ind],
+            window_width,
+            window_height,
+        )?);
+    }
+
+    let vert_module = create_shader_module(&device, "examples/shaders/triangle.vert.spv")?;
+    let frag_module = create_shader_module(&device, "examples/shaders/triangle.frag.spv")?;
+
+    let pipeline_layout = create_pipeline_layout(&device)?;
+    let graphics_pipeline = create_graphics_pipeline(
+        &device,
+        render_pass,
+        pipeline_layout,
+        vert_module,
+        frag_module,
+    )?;
 
     let command_pool = create_command_pool(&device)?;
     let command_buffer_allocate_info = vk::CommandBufferAllocateInfo::default()
@@ -437,7 +647,8 @@ fn main() -> anyhow::Result<()> {
             handle_window_event(&mut window, event);
         }
 
-        let (image_index, is_suboptimal) = unsafe {
+        let (image_index, _is_suboptimal) = unsafe {
+            // TODO: resizing
             swapchain_device_fns.acquire_next_image(
                 swapchain,
                 u64::MAX,
@@ -453,68 +664,110 @@ fn main() -> anyhow::Result<()> {
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
         unsafe {
             device.begin_command_buffer(command_buffer, &begin_info)?; // TODO: Command buffer
-            let to_transfer_barrier = vk::ImageMemoryBarrier::default()
-                .src_access_mask(vk::AccessFlags::empty())
-                .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-                .old_layout(vk::ImageLayout::UNDEFINED)
-                .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-                .image(images[image_index as usize])
-                .subresource_range(vk::ImageSubresourceRange {
-                    aspect_mask: vk::ImageAspectFlags::COLOR,
-                    base_mip_level: 0,
-                    level_count: 1,
-                    base_array_layer: 0,
-                    layer_count: 1,
-                })
-                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED);
+                                                                       // let to_transfer_barrier = vk::ImageMemoryBarrier::default()
+                                                                       //     .src_access_mask(vk::AccessFlags::empty())
+                                                                       //     .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                                                                       //     .old_layout(vk::ImageLayout::UNDEFINED)
+                                                                       //     .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                                                                       //     .image(images[image_index as usize])
+                                                                       //     .subresource_range(vk::ImageSubresourceRange {
+                                                                       //         aspect_mask: vk::ImageAspectFlags::COLOR,
+                                                                       //         base_mip_level: 0,
+                                                                       //         level_count: 1,
+                                                                       //         base_array_layer: 0,
+                                                                       //         layer_count: 1,
+                                                                       //     })
+                                                                       //     .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                                                                       //     .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED);
+                                                                       // device.cmd_pipeline_barrier(
+                                                                       //     command_buffer,
+                                                                       //     vk::PipelineStageFlags::TOP_OF_PIPE,
+                                                                       //     vk::PipelineStageFlags::TRANSFER,
+                                                                       //     vk::DependencyFlags::empty(),
+                                                                       //     &[],
+                                                                       //     &[],
+                                                                       //     &[to_transfer_barrier],
+                                                                       // );
 
-            device.cmd_pipeline_barrier(
-                command_buffer,
-                vk::PipelineStageFlags::TOP_OF_PIPE,
-                vk::PipelineStageFlags::TRANSFER,
-                vk::DependencyFlags::empty(),
-                &[],
-                &[],
-                &[to_transfer_barrier],
-            );
-
-            let subresource_range = vk::ImageSubresourceRange {
-                aspect_mask: vk::ImageAspectFlags::COLOR,
-                base_mip_level: 0,
-                level_count: 1,
-                base_array_layer: 0,
-                layer_count: 1,
-            };
-            device.cmd_clear_color_image(
-                command_buffer,
-                images[image_index as usize],
-                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                &vk::ClearColorValue {
-                    float32: [1.0, 1.0, 0.0, 1.0],
+            let clear_values = &[vk::ClearValue {
+                color: vk::ClearColorValue {
+                    float32: [0.2, 0.8, 0.9, 1.0],
                 },
-                &[subresource_range],
-            );
-            let to_present_barrier = vk::ImageMemoryBarrier::default()
-                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-                .dst_access_mask(vk::AccessFlags::empty())
-                .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-                .new_layout(vk::ImageLayout::PRESENT_SRC_KHR) // For presenting
-                .image(images[image_index as usize])
-                .subresource_range(subresource_range)
-                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED);
+            }];
+            let render_pass_begin = vk::RenderPassBeginInfo::default()
+                .render_pass(render_pass)
+                .clear_values(clear_values)
+                .framebuffer(framebuffers[image_index as usize])
+                .render_area(vk::Rect2D {
+                    extent: vk::Extent2D {
+                        width: window_width,
+                        height: window_height,
+                    },
+                    offset: vk::Offset2D { x: 0, y: 0 },
+                });
 
-            device.cmd_pipeline_barrier(
+            let viewports = &[vk::Viewport::default()
+                .x(0.0)
+                .y(window_height as f32)
+                .width(window_width as f32)
+                .height(-(window_height as f32))
+                .min_depth(0.0)
+                .max_depth(1.0)];
+            device.cmd_set_viewport(command_buffer, 0, viewports);
+            let scissors = &[vk::Rect2D {
+                extent: vk::Extent2D {
+                    width: window_width,
+                    height: window_height,
+                },
+                offset: vk::Offset2D { x: 0, y: 0 },
+            }];
+            device.cmd_set_scissor(command_buffer, 0, scissors);
+            // render_pass: RenderPass::default(),
+            // framebuffer: Framebuffer::default(),
+            // render_area: Rect2D::default(),
+            // clear_value_count: u32::default(),
+            // p_clear_values: ::core::ptr::null(),
+            device.cmd_begin_render_pass(
                 command_buffer,
-                vk::PipelineStageFlags::TRANSFER,
-                vk::PipelineStageFlags::BOTTOM_OF_PIPE,
-                vk::DependencyFlags::empty(),
-                &[],
-                &[],
-                &[to_present_barrier],
+                &render_pass_begin,
+                vk::SubpassContents::INLINE,
+            );
+            device.cmd_bind_pipeline(
+                command_buffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                graphics_pipeline,
             );
 
+            device.cmd_draw(command_buffer, 3, 1, 0, 0);
+
+            // let subresource_range = vk::ImageSubresourceRange {
+            //     aspect_mask: vk::ImageAspectFlags::COLOR,
+            //     base_mip_level: 0,
+            //     level_count: 1,
+            //     base_array_layer: 0,
+            //     layer_count: 1,
+            // };
+            // let to_present_barrier = vk::ImageMemoryBarrier::default()
+            //     .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+            //     .dst_access_mask(vk::AccessFlags::empty())
+            //     .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            //     .new_layout(vk::ImageLayout::PRESENT_SRC_KHR) // For presenting
+            //     .image(images[image_index as usize])
+            //     .subresource_range(subresource_range)
+            //     .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            //     .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED);
+
+            // device.cmd_pipeline_barrier(
+            //     command_buffer,
+            //     vk::PipelineStageFlags::TRANSFER,
+            //     vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+            //     vk::DependencyFlags::empty(),
+            //     &[],
+            //     &[],
+            //     &[to_present_barrier],
+            // );
+
+            device.cmd_end_render_pass(command_buffer);
             device.end_command_buffer(command_buffer)?;
 
             let cmds = &[command_buffer];
@@ -549,6 +802,12 @@ fn main() -> anyhow::Result<()> {
         device.free_command_buffers(command_pool, &command_buffers);
         device.destroy_command_pool(command_pool, None);
 
+        device.destroy_pipeline(graphics_pipeline, None);
+        device.destroy_pipeline_layout(pipeline_layout, None);
+        for ind in 0..images.len() {
+            device.destroy_image_view(image_views[ind], None);
+            device.destroy_framebuffer(framebuffers[ind], None);
+        }
         device.destroy_render_pass(render_pass, None);
         swapchain_device_fns.destroy_swapchain(swapchain, None);
         surface_instance_fns.destroy_surface(surface, None);
