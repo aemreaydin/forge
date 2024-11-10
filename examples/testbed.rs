@@ -4,7 +4,8 @@ use ash::{
     vk::{self, EXT_DEBUG_UTILS_NAME, KHR_SWAPCHAIN_NAME},
     Device, Entry, Instance,
 };
-use glfw::{Action, Context as GlfwContext, Key};
+use forge::swapchain::Swapchain;
+use glfw::{Action, Context as GlfwContext, Key, PWindow};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use std::path::Path;
 
@@ -301,33 +302,6 @@ fn get_suitable_format(
         .context("failed to find a suitable surface format")
 }
 
-fn create_swapchain(
-    instance: &Instance,
-    device: &Device,
-    surface: vk::SurfaceKHR,
-    format: vk::SurfaceFormatKHR,
-    width: u32,
-    height: u32,
-) -> anyhow::Result<(khr::swapchain::Device, vk::SwapchainKHR)> {
-    let create_info = vk::SwapchainCreateInfoKHR::default()
-        .surface(surface)
-        .min_image_count(3)
-        .image_format(format.format)
-        .image_color_space(format.color_space)
-        .image_array_layers(1)
-        .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_DST)
-        .queue_family_indices(&[0])
-        .pre_transform(vk::SurfaceTransformFlagsKHR::IDENTITY)
-        .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
-        .present_mode(vk::PresentModeKHR::FIFO)
-        .image_extent(vk::Extent2D { width, height });
-
-    let swapchain_device_fns = khr::swapchain::Device::new(instance, device);
-    let swapchain = unsafe { swapchain_device_fns.create_swapchain(&create_info, None)? };
-
-    Ok((swapchain_device_fns, swapchain))
-}
-
 fn create_command_pool(device: &Device) -> anyhow::Result<vk::CommandPool> {
     let create_info = vk::CommandPoolCreateInfo::default()
         .queue_family_index(0)
@@ -339,6 +313,11 @@ fn create_command_pool(device: &Device) -> anyhow::Result<vk::CommandPool> {
 fn create_semaphore(device: &Device) -> anyhow::Result<vk::Semaphore> {
     let create_info = vk::SemaphoreCreateInfo::default();
     Ok(unsafe { device.create_semaphore(&create_info, None)? })
+}
+
+fn create_fence(device: &Device) -> anyhow::Result<vk::Fence> {
+    let create_info = vk::FenceCreateInfo::default();
+    Ok(unsafe { device.create_fence(&create_info, None)? })
 }
 
 fn create_render_pass(device: &Device, format: vk::Format) -> anyhow::Result<vk::RenderPass> {
@@ -368,49 +347,6 @@ fn create_render_pass(device: &Device, format: vk::Format) -> anyhow::Result<vk:
         .subpasses(subpasses);
 
     Ok(unsafe { device.create_render_pass(&create_info, None)? })
-}
-
-fn create_image_view(
-    device: &Device,
-    image: vk::Image,
-    format: vk::Format,
-) -> anyhow::Result<vk::ImageView> {
-    let create_info = vk::ImageViewCreateInfo::default()
-        .image(image)
-        .view_type(vk::ImageViewType::TYPE_2D)
-        .format(format)
-        .components(
-            vk::ComponentMapping::default()
-                .r(vk::ComponentSwizzle::IDENTITY)
-                .g(vk::ComponentSwizzle::IDENTITY)
-                .b(vk::ComponentSwizzle::IDENTITY)
-                .a(vk::ComponentSwizzle::IDENTITY),
-        )
-        .subresource_range(vk::ImageSubresourceRange {
-            aspect_mask: vk::ImageAspectFlags::COLOR,
-            base_mip_level: 0,
-            level_count: 1,
-            base_array_layer: 0,
-            layer_count: 1,
-        });
-    Ok(unsafe { device.create_image_view(&create_info, None)? })
-}
-
-fn create_framebuffer(
-    device: &Device,
-    render_pass: vk::RenderPass,
-    image_view: vk::ImageView,
-    width: u32,
-    height: u32,
-) -> anyhow::Result<vk::Framebuffer> {
-    let attachments = &[image_view];
-    let create_info = vk::FramebufferCreateInfo::default()
-        .render_pass(render_pass)
-        .width(width)
-        .height(height)
-        .layers(1)
-        .attachments(attachments);
-    Ok(unsafe { device.create_framebuffer(&create_info, None)? })
 }
 
 fn load_shader<P: AsRef<Path>>(path: P) -> anyhow::Result<Vec<u32>> {
@@ -548,6 +484,12 @@ fn create_pipeline_layout(device: &Device) -> anyhow::Result<vk::PipelineLayout>
 //             )
 //         })?
 // }
+//
+
+fn get_window_size(window: &PWindow) -> (u32, u32) {
+    let (window_width, window_height) = window.get_size();
+    (window_width as u32, window_height as u32)
+}
 
 fn main() -> anyhow::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
@@ -561,8 +503,8 @@ fn main() -> anyhow::Result<()> {
         .context("failed to create a glfw window")?;
     window.set_key_polling(true);
     window.make_current();
-    let (window_width, window_height) = window.get_size();
-    let (window_width, window_height) = (window_width as u32, window_height as u32);
+
+    let (mut window_width, mut window_height) = window.get_framebuffer_size();
 
     let entry = unsafe { Entry::load()? };
 
@@ -585,44 +527,28 @@ fn main() -> anyhow::Result<()> {
     };
 
     let instance = create_instance(&entry, &mut debug_info)?;
-    let debug_handles = create_debug_utils(&entry, &instance, debug_info)?;
+    let debug_instance_fns = create_debug_utils(&entry, &instance, debug_info)?;
 
     let (surface_instance_fns, surface) = create_surface(&entry, &instance, &window)?;
     let physical_device = create_physical_device(&instance, &surface_instance_fns, surface)?;
-    let format = get_suitable_format(physical_device, surface, &surface_instance_fns)?;
-
     let device = create_device(&instance, &physical_device)?;
-    let queue = unsafe { device.get_device_queue(0, 0) };
 
-    let (swapchain_device_fns, swapchain) = create_swapchain(
-        &instance,
-        &device,
-        surface,
-        format,
-        window_width,
-        window_height,
-    )?;
-
-    let images = unsafe { swapchain_device_fns.get_swapchain_images(swapchain)? };
+    let format = get_suitable_format(physical_device, surface, &surface_instance_fns)?;
     let render_pass = create_render_pass(&device, format.format)?;
 
-    let mut image_views = Vec::with_capacity(images.len());
-    let mut framebuffers = Vec::with_capacity(images.len());
-    for (ind, image) in images.iter().enumerate() {
-        image_views.push(create_image_view(&device, *image, format.format)?);
-        framebuffers.push(create_framebuffer(
-            &device,
-            render_pass,
-            image_views[ind],
-            window_width,
-            window_height,
-        )?);
-    }
+    let surface_capabilities = unsafe {
+        surface_instance_fns.get_physical_device_surface_capabilities(physical_device, surface)?
+    };
+    let mut extent = surface_capabilities.current_extent;
+
+    let mut swapchain = Swapchain::new(&instance, &device, surface, render_pass, format, extent)?;
+
+    let queue = unsafe { device.get_device_queue(0, 0) };
+
+    let pipeline_layout = create_pipeline_layout(&device)?;
 
     let vert_module = create_shader_module(&device, "examples/shaders/triangle.vert.spv")?;
     let frag_module = create_shader_module(&device, "examples/shaders/triangle.frag.spv")?;
-
-    let pipeline_layout = create_pipeline_layout(&device)?;
     let graphics_pipeline = create_graphics_pipeline(
         &device,
         render_pass,
@@ -638,24 +564,34 @@ fn main() -> anyhow::Result<()> {
     let command_buffers =
         unsafe { device.allocate_command_buffers(&command_buffer_allocate_info)? };
 
-    let acquire_semaphore = create_semaphore(&device)?;
-    let present_semaphore = create_semaphore(&device)?;
+    let mut acquire_semaphore = create_semaphore(&device)?;
+    let mut present_semaphore = create_semaphore(&device)?;
+    let fence = create_fence(&device)?;
 
     while !window.should_close() {
-        glfw.poll_events();
-        for (_, event) in glfw::flush_messages(&events) {
-            handle_window_event(&mut window, event);
+        let surface_capabilities = unsafe {
+            surface_instance_fns
+                .get_physical_device_surface_capabilities(physical_device, surface)?
+        };
+        if surface_capabilities.current_extent.width != window_width as u32
+            && surface_capabilities.current_extent.height != window_height as u32
+        {
+            unsafe {
+                device.device_wait_idle()?;
+            }
+            extent = surface_capabilities.current_extent;
+            swapchain = swapchain.recreate_swapchain(surface, render_pass, format, extent)?;
+
+            unsafe {
+                device.destroy_semaphore(acquire_semaphore, None);
+                device.destroy_semaphore(present_semaphore, None);
+
+                acquire_semaphore = create_semaphore(&device)?;
+                present_semaphore = create_semaphore(&device)?;
+            }
         }
 
-        let (image_index, _is_suboptimal) = unsafe {
-            // TODO: resizing
-            swapchain_device_fns.acquire_next_image(
-                swapchain,
-                u64::MAX,
-                acquire_semaphore,
-                vk::Fence::null(),
-            )?
-        };
+        swapchain.acquire_next_image(acquire_semaphore, vk::Fence::null())?;
 
         unsafe { device.reset_command_pool(command_pool, vk::CommandPoolResetFlags::empty())? }
 
@@ -663,31 +599,33 @@ fn main() -> anyhow::Result<()> {
         let begin_info = vk::CommandBufferBeginInfo::default()
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
         unsafe {
-            device.begin_command_buffer(command_buffer, &begin_info)?; // TODO: Command buffer
-                                                                       // let to_transfer_barrier = vk::ImageMemoryBarrier::default()
-                                                                       //     .src_access_mask(vk::AccessFlags::empty())
-                                                                       //     .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-                                                                       //     .old_layout(vk::ImageLayout::UNDEFINED)
-                                                                       //     .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-                                                                       //     .image(images[image_index as usize])
-                                                                       //     .subresource_range(vk::ImageSubresourceRange {
-                                                                       //         aspect_mask: vk::ImageAspectFlags::COLOR,
-                                                                       //         base_mip_level: 0,
-                                                                       //         level_count: 1,
-                                                                       //         base_array_layer: 0,
-                                                                       //         layer_count: 1,
-                                                                       //     })
-                                                                       //     .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                                                                       //     .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED);
-                                                                       // device.cmd_pipeline_barrier(
-                                                                       //     command_buffer,
-                                                                       //     vk::PipelineStageFlags::TOP_OF_PIPE,
-                                                                       //     vk::PipelineStageFlags::TRANSFER,
-                                                                       //     vk::DependencyFlags::empty(),
-                                                                       //     &[],
-                                                                       //     &[],
-                                                                       //     &[to_transfer_barrier],
-                                                                       // );
+            device.begin_command_buffer(command_buffer, &begin_info)?;
+
+            // TODO: Command buffer
+            // let to_transfer_barrier = vk::ImageMemoryBarrier::default()
+            //     .src_access_mask(vk::AccessFlags::empty())
+            //     .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+            //     .old_layout(vk::ImageLayout::UNDEFINED)
+            //     .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            //     .image(images[image_index as usize])
+            //     .subresource_range(vk::ImageSubresourceRange {
+            //         aspect_mask: vk::ImageAspectFlags::COLOR,
+            //         base_mip_level: 0,
+            //         level_count: 1,
+            //         base_array_layer: 0,
+            //         layer_count: 1,
+            // })
+            //     .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            //     .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED);
+            // device.cmd_pipeline_barrier(
+            //     command_buffer,
+            //     vk::PipelineStageFlags::TOP_OF_PIPE,
+            //     vk::PipelineStageFlags::TRANSFER,
+            //     vk::DependencyFlags::empty(),
+            //     &[],
+            //     &[],
+            //     &[to_transfer_barrier],
+            // );
 
             let clear_values = &[vk::ClearValue {
                 color: vk::ClearColorValue {
@@ -697,28 +635,22 @@ fn main() -> anyhow::Result<()> {
             let render_pass_begin = vk::RenderPassBeginInfo::default()
                 .render_pass(render_pass)
                 .clear_values(clear_values)
-                .framebuffer(framebuffers[image_index as usize])
+                .framebuffer(swapchain.framebuffer())
                 .render_area(vk::Rect2D {
-                    extent: vk::Extent2D {
-                        width: window_width,
-                        height: window_height,
-                    },
+                    extent: swapchain.extent,
                     offset: vk::Offset2D { x: 0, y: 0 },
                 });
 
             let viewports = &[vk::Viewport::default()
                 .x(0.0)
-                .y(window_height as f32)
-                .width(window_width as f32)
-                .height(-(window_height as f32))
+                .y(swapchain.extent.height as f32)
+                .width(swapchain.extent.width as f32)
+                .height(-(swapchain.extent.height as f32))
                 .min_depth(0.0)
                 .max_depth(1.0)];
             device.cmd_set_viewport(command_buffer, 0, viewports);
             let scissors = &[vk::Rect2D {
-                extent: vk::Extent2D {
-                    width: window_width,
-                    height: window_height,
-                },
+                extent: swapchain.extent,
                 offset: vk::Offset2D { x: 0, y: 0 },
             }];
             device.cmd_set_scissor(command_buffer, 0, scissors);
@@ -773,29 +705,38 @@ fn main() -> anyhow::Result<()> {
             let cmds = &[command_buffer];
             let waits = &[acquire_semaphore];
             let presents = &[present_semaphore];
-            let images = &[image_index];
+            let images = &[swapchain.image_index()];
             let stage_flags = &[vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
             let submit_info = vk::SubmitInfo::default()
                 .command_buffers(cmds)
                 .wait_semaphores(waits)
                 .signal_semaphores(presents)
                 .wait_dst_stage_mask(stage_flags);
-            device.queue_submit(queue, &[submit_info], vk::Fence::null())?;
+            device.queue_submit(queue, &[submit_info], fence)?;
 
-            let swapchains = &[swapchain];
+            let swapchains = &[swapchain.handle()];
             let present_info = vk::PresentInfoKHR::default()
                 .image_indices(images)
                 .swapchains(swapchains)
                 .wait_semaphores(presents);
-            swapchain_device_fns.queue_present(queue, &present_info)?;
 
-            device.device_wait_idle()?;
+            swapchain.queue_present(queue, &present_info)?;
+
+            let fences = &[fence];
+            device.wait_for_fences(fences, true, u64::MAX)?;
+            device.reset_fences(fences)?;
         };
+
+        glfw.poll_events();
+        for (_, event) in glfw::flush_messages(&events) {
+            handle_window_event(&mut window, event);
+        }
     }
 
     unsafe {
         device.device_wait_idle()?;
 
+        device.destroy_fence(fence, None);
         device.destroy_semaphore(acquire_semaphore, None);
         device.destroy_semaphore(present_semaphore, None);
 
@@ -804,16 +745,12 @@ fn main() -> anyhow::Result<()> {
 
         device.destroy_pipeline(graphics_pipeline, None);
         device.destroy_pipeline_layout(pipeline_layout, None);
-        for ind in 0..images.len() {
-            device.destroy_image_view(image_views[ind], None);
-            device.destroy_framebuffer(framebuffers[ind], None);
-        }
+        swapchain.destroy_swapchain();
         device.destroy_render_pass(render_pass, None);
-        swapchain_device_fns.destroy_swapchain(swapchain, None);
         surface_instance_fns.destroy_surface(surface, None);
         device.destroy_device(None);
 
-        if let Some((debug_fns, debug_callback)) = debug_handles {
+        if let Some((debug_fns, debug_callback)) = debug_instance_fns {
             debug_fns.destroy_debug_utils_messenger(debug_callback, None);
         }
         instance.destroy_instance(None);
