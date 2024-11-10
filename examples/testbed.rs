@@ -13,12 +13,14 @@ const VALIDATION_ENABLED: bool = cfg!(debug_assertions);
 const VALIDATION_LAYER: &std::ffi::CStr =
     unsafe { std::ffi::CStr::from_bytes_with_nul_unchecked(b"VK_LAYER_KHRONOS_validation\0") };
 #[cfg(any(target_os = "macos", target_os = "ios"))]
-const MACOS_REQUIRED_INSTANCE_EXTENSIONS: &[*const i8] = &[
+const REQUIRED_INSTANCE_EXTENSIONS: &[*const i8] = &[
     vk::EXT_METAL_SURFACE_NAME.as_ptr(),
     khr::portability_enumeration::NAME.as_ptr(),
     khr::get_physical_device_properties2::NAME.as_ptr(),
     mvk::macos_surface::NAME.as_ptr(),
 ];
+#[cfg(target_os = "linux")]
+const REQUIRED_INSTANCE_EXTENSIONS: &[*const i8] = &[khr::xlib_surface::NAME.as_ptr()];
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 const MACOS_REQUIRED_DEVICE_EXTENSIONS: &[*const i8] = &[
     khr::portability_subset::NAME.as_ptr(),
@@ -151,8 +153,7 @@ fn get_required_instance_extensions(entry: &Entry) -> anyhow::Result<Vec<*const 
         required_extensions.push(EXT_DEBUG_UTILS_NAME.as_ptr());
         log::info!("Adding {:?}", EXT_DEBUG_UTILS_NAME);
     }
-    #[cfg(any(target_os = "macos", target_os = "ios"))]
-    required_extensions.extend_from_slice(MACOS_REQUIRED_INSTANCE_EXTENSIONS);
+    required_extensions.extend_from_slice(REQUIRED_INSTANCE_EXTENSIONS);
     let system_extension_names = unsafe {
         entry
             .enumerate_instance_extension_properties(None)?
@@ -504,8 +505,6 @@ fn main() -> anyhow::Result<()> {
     window.set_key_polling(true);
     window.make_current();
 
-    let (mut window_width, mut window_height) = window.get_framebuffer_size();
-
     let entry = unsafe { Entry::load()? };
 
     let mut debug_info = if VALIDATION_ENABLED {
@@ -573,9 +572,12 @@ fn main() -> anyhow::Result<()> {
             surface_instance_fns
                 .get_physical_device_surface_capabilities(physical_device, surface)?
         };
-        if surface_capabilities.current_extent.width != window_width as u32
-            && surface_capabilities.current_extent.height != window_height as u32
+
+        if surface_capabilities.current_extent.width != extent.width
+            || surface_capabilities.current_extent.height != extent.height
         {
+            println!("{:?}", surface_capabilities.current_extent);
+            println!("{:?}", extent);
             unsafe {
                 device.device_wait_idle()?;
             }
