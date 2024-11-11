@@ -5,13 +5,14 @@ use ash::{
     Device, Entry, Instance,
 };
 use forge::swapchain::Swapchain;
-use glfw::{Action, Context as GlfwContext, Key, PWindow};
+use glfw::{Action, Context as GlfwContext, Key};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use std::path::Path;
 
 const VALIDATION_ENABLED: bool = cfg!(debug_assertions);
 const VALIDATION_LAYER: &std::ffi::CStr =
     unsafe { std::ffi::CStr::from_bytes_with_nul_unchecked(b"VK_LAYER_KHRONOS_validation\0") };
+
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 const REQUIRED_INSTANCE_EXTENSIONS: &[*const i8] = &[
     vk::EXT_METAL_SURFACE_NAME.as_ptr(),
@@ -21,6 +22,7 @@ const REQUIRED_INSTANCE_EXTENSIONS: &[*const i8] = &[
 ];
 #[cfg(target_os = "linux")]
 const REQUIRED_INSTANCE_EXTENSIONS: &[*const i8] = &[khr::xlib_surface::NAME.as_ptr()];
+
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 const MACOS_REQUIRED_DEVICE_EXTENSIONS: &[*const i8] = &[
     khr::portability_subset::NAME.as_ptr(),
@@ -487,11 +489,6 @@ fn create_pipeline_layout(device: &Device) -> anyhow::Result<vk::PipelineLayout>
 // }
 //
 
-fn get_window_size(window: &PWindow) -> (u32, u32) {
-    let (window_width, window_height) = window.get_size();
-    (window_width as u32, window_height as u32)
-}
-
 fn main() -> anyhow::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
         .format_target(false)
@@ -499,6 +496,8 @@ fn main() -> anyhow::Result<()> {
         .format_timestamp_nanos()
         .init();
     let mut glfw = glfw::init_no_callbacks()?;
+    glfw.window_hint(glfw::WindowHint::ClientApi(glfw::ClientApiHint::NoApi));
+    glfw.window_hint(glfw::WindowHint::ScaleToMonitor(false));
     let (mut window, events) = glfw
         .create_window(1920, 1080, "forge", glfw::WindowMode::Windowed)
         .context("failed to create a glfw window")?;
@@ -576,13 +575,11 @@ fn main() -> anyhow::Result<()> {
         if surface_capabilities.current_extent.width != extent.width
             || surface_capabilities.current_extent.height != extent.height
         {
-            println!("{:?}", surface_capabilities.current_extent);
-            println!("{:?}", extent);
             unsafe {
                 device.device_wait_idle()?;
             }
             extent = surface_capabilities.current_extent;
-            swapchain = swapchain.recreate_swapchain(surface, render_pass, format, extent)?;
+            swapchain = swapchain.recreate(surface, render_pass, format, extent)?;
 
             unsafe {
                 device.destroy_semaphore(acquire_semaphore, None);
@@ -763,6 +760,7 @@ fn main() -> anyhow::Result<()> {
 fn handle_window_event(window: &mut glfw::Window, event: glfw::WindowEvent) {
     match event {
         glfw::WindowEvent::Key(Key::Escape, _, Action::Press, _) => window.set_should_close(true),
+        glfw::WindowEvent::Key(Key::Space, _, Action::Press, _) => {}
         _ => {}
     }
 }

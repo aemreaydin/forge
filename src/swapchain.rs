@@ -43,7 +43,7 @@ impl Swapchain {
         })
     }
 
-    pub fn recreate_swapchain(
+    pub fn recreate(
         self,
         surface: vk::SurfaceKHR,
         render_pass: vk::RenderPass,
