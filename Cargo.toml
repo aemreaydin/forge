@@ -9,6 +9,6 @@ ash = { version = "0.38.0", features = ["linked"] }
 ash-window = "0.13.0"
 bytemuck = { version = "1.19.0", features = ["extern_crate_std"] }
 env_logger = "0.11.5"
-glfw = { version = "0.58.0", features = ["raw-window-handle-v0-6"] }
+glfw = "0.58.0"
 log = "0.4.22"
 raw-window-handle = "0.6.2"
