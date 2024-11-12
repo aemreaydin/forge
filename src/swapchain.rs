@@ -1,11 +1,13 @@
 use ash::{khr, vk, Device, Instance};
 
+struct SwapchainResources {
+    swapchain: vk::SwapchainKHR,
+    images: Vec<vk::Image>,
+    image_views: Vec<vk::ImageView>,
+    framebuffers: Vec<vk::Framebuffer>,
+}
 pub struct Swapchain {
-    pub swapchain: vk::SwapchainKHR,
-    pub images: Vec<vk::Image>,
-    pub image_views: Vec<vk::ImageView>,
-    pub framebuffers: Vec<vk::Framebuffer>,
-
+    handles: SwapchainResources,
     pub format: vk::SurfaceFormatKHR,
     pub extent: vk::Extent2D,
 
@@ -25,13 +27,10 @@ impl Swapchain {
         extent: vk::Extent2D,
     ) -> anyhow::Result<Self> {
         let loader = khr::swapchain::Device::new(instance, device);
-        let (swapchain, images, image_views, framebuffers) =
+        let handles =
             Self::create_swapchain(device, &loader, surface, render_pass, format, extent)?;
         Ok(Self {
-            swapchain,
-            images,
-            image_views,
-            framebuffers,
+            handles,
 
             format,
             extent,
@@ -50,9 +49,9 @@ impl Swapchain {
         format: vk::SurfaceFormatKHR,
         extent: vk::Extent2D,
     ) -> anyhow::Result<Self> {
-        self.destroy_swapchain();
+        self.destroy();
 
-        let (swapchain, images, image_views, framebuffers) = Self::create_swapchain(
+        let handles = Self::create_swapchain(
             &self.device,
             &self.loader,
             surface,
@@ -61,10 +60,7 @@ impl Swapchain {
             extent,
         )?;
         Ok(Self {
-            swapchain,
-            images,
-            image_views,
-            framebuffers,
+            handles,
 
             format,
             extent,
@@ -82,9 +78,12 @@ impl Swapchain {
         fence: vk::Fence,
     ) -> anyhow::Result<bool> {
         unsafe {
-            let (image_index, is_suboptimal) =
-                self.loader
-                    .acquire_next_image(self.swapchain, u64::MAX, semaphore, fence)?;
+            let (image_index, is_suboptimal) = self.loader.acquire_next_image(
+                self.handles.swapchain,
+                u64::MAX,
+                semaphore,
+                fence,
+            )?;
 
             self.current_image_index = image_index;
             Ok(is_suboptimal)
@@ -99,8 +98,8 @@ impl Swapchain {
         unsafe { Ok(self.loader.queue_present(queue, present_info)?) }
     }
 
-    pub fn handle(&self) -> vk::SwapchainKHR {
-        self.swapchain
+    pub fn swapchain(&self) -> vk::SwapchainKHR {
+        self.handles.swapchain
     }
 
     pub fn image_index(&self) -> u32 {
@@ -108,21 +107,22 @@ impl Swapchain {
     }
 
     pub fn framebuffer(&self) -> vk::Framebuffer {
-        self.framebuffers[self.current_image_index as usize]
+        self.handles.framebuffers[self.current_image_index as usize]
     }
 
     pub fn image(&self) -> vk::Image {
-        self.images[self.current_image_index as usize]
+        self.handles.images[self.current_image_index as usize]
     }
 
-    pub fn destroy_swapchain(&self) {
+    pub fn destroy(&self) {
         unsafe {
-            for ind in 0..self.images.len() {
-                self.device.destroy_image_view(self.image_views[ind], None);
+            for ind in 0..self.handles.images.len() {
                 self.device
-                    .destroy_framebuffer(self.framebuffers[ind], None);
+                    .destroy_image_view(self.handles.image_views[ind], None);
+                self.device
+                    .destroy_framebuffer(self.handles.framebuffers[ind], None);
             }
-            self.loader.destroy_swapchain(self.swapchain, None);
+            self.loader.destroy_swapchain(self.handles.swapchain, None);
         }
     }
 
@@ -133,12 +133,7 @@ impl Swapchain {
         render_pass: vk::RenderPass,
         format: vk::SurfaceFormatKHR,
         extent: vk::Extent2D,
-    ) -> anyhow::Result<(
-        vk::SwapchainKHR,
-        Vec<vk::Image>,
-        Vec<vk::ImageView>,
-        Vec<vk::Framebuffer>,
-    )> {
+    ) -> anyhow::Result<SwapchainResources> {
         unsafe {
             let create_info = vk::SwapchainCreateInfoKHR::default()
                 .surface(surface)
@@ -169,7 +164,12 @@ impl Swapchain {
                     extent.height,
                 )?);
             }
-            Ok((swapchain, images, image_views, framebuffers))
+            Ok(SwapchainResources {
+                swapchain,
+                images,
+                image_views,
+                framebuffers,
+            })
         }
     }
 

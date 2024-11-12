@@ -4,9 +4,9 @@ use ash::{
     vk::{self, EXT_DEBUG_UTILS_NAME, KHR_SWAPCHAIN_NAME},
     Device, Entry, Instance,
 };
+use forge::surface::Surface;
 use forge::swapchain::Swapchain;
 use glfw::{Action, Context as GlfwContext, Key};
-use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use std::path::Path;
 
 const VALIDATION_ENABLED: bool = cfg!(debug_assertions);
@@ -202,70 +202,48 @@ fn get_required_device_extensions(
     Ok(required_extensions)
 }
 
-fn create_surface(
-    entry: &Entry,
-    instance: &Instance,
-    handle: &(impl HasDisplayHandle + HasWindowHandle),
-) -> anyhow::Result<(khr::surface::Instance, vk::SurfaceKHR)> {
-    let raw_display_handle = handle
-        .display_handle()
-        .expect("failed to get raw display handle")
-        .as_raw();
-    let raw_window_handle = handle
-        .window_handle()
-        .expect("failed to get raw window handle")
-        .as_raw();
-    unsafe {
-        Ok((
-            khr::surface::Instance::new(entry, instance),
-            ash_window::create_surface(
-                entry,
-                instance,
-                raw_display_handle,
-                raw_window_handle,
-                None,
-            )?,
-        ))
-    }
-}
-
 fn create_physical_device(
     instance: &Instance,
-    surface_instance_fns: &khr::surface::Instance,
-    surface: vk::SurfaceKHR,
+    surface: &Surface,
 ) -> anyhow::Result<vk::PhysicalDevice> {
     let physical_devices = unsafe { instance.enumerate_physical_devices()? };
 
     let mut selected_device: Option<vk::PhysicalDevice> = None;
+    let mut fallback_device: Option<vk::PhysicalDevice> = None;
     for device in &physical_devices {
         let props = unsafe { instance.get_physical_device_properties(*device) };
-        let surface_support = unsafe {
-            surface_instance_fns.get_physical_device_surface_support(*device, 0, surface)?
-        }; // TODO: Queue family index is hardcoded
-           // TODO: These are not being used right now
+        let surface_support = surface.get_physical_device_surface_support_khr(*device, 0)?; // TODO: Queue family index is hardcoded
+                                                                                            // TODO: These are not being used right now
         let _features = unsafe { instance.get_physical_device_features(*device) };
-        let _is_discrete = props.device_type == vk::PhysicalDeviceType::DISCRETE_GPU;
+        let is_discrete = props.device_type == vk::PhysicalDeviceType::DISCRETE_GPU;
 
         match surface_support {
-            true => {
-                if props.device_type == vk::PhysicalDeviceType::DISCRETE_GPU {
-                    log::info!("Using {}", i8_array_to_string(&props.device_name));
-                    return Ok(*device);
-                } else {
-                    selected_device = Some(*device)
-                }
+            true if is_discrete => {
+                selected_device = Some(*device);
             }
+            true => fallback_device = Some(*device),
             false => {}
         }
     }
 
-    match selected_device {
-        Some(device) => {
+    match (selected_device, fallback_device) {
+        (Some(device), _) => {
             let props = unsafe { instance.get_physical_device_properties(device) };
-            log::info!("Using {}", i8_array_to_string(&props.device_name));
+            log::info!(
+                "Using discrete gpu: {}",
+                i8_array_to_string(&props.device_name)
+            );
             Ok(device)
         }
-        None => Err(anyhow!("no suitable physical devices found")),
+        (_, Some(fallback)) => {
+            let props = unsafe { instance.get_physical_device_properties(fallback) };
+            log::info!(
+                "Using fallback device: {}",
+                i8_array_to_string(&props.device_name)
+            );
+            Ok(fallback)
+        }
+        _ => Err(anyhow!("no suitable physical devices found")),
     }
 }
 
@@ -288,12 +266,9 @@ fn create_device(
 
 fn get_suitable_format(
     physical_device: vk::PhysicalDevice,
-    surface: vk::SurfaceKHR,
-    surface_instance_fns: &khr::surface::Instance,
+    surface: &Surface,
 ) -> anyhow::Result<vk::SurfaceFormatKHR> {
-    let surface_formats = unsafe {
-        surface_instance_fns.get_physical_device_surface_formats(physical_device, surface)?
-    };
+    let surface_formats = surface.get_physical_device_surface_formats_khr(physical_device)?;
     surface_formats
         .into_iter()
         .find(|format| {
@@ -527,26 +502,32 @@ fn main() -> anyhow::Result<()> {
     let instance = create_instance(&entry, &mut debug_info)?;
     let debug_instance_fns = create_debug_utils(&entry, &instance, debug_info)?;
 
-    let (surface_instance_fns, surface) = create_surface(&entry, &instance, &window)?;
-    let physical_device = create_physical_device(&instance, &surface_instance_fns, surface)?;
+    let surface = Surface::new(&entry, &instance, &window)?;
+    let physical_device = create_physical_device(&instance, &surface)?;
     let device = create_device(&instance, &physical_device)?;
 
-    let format = get_suitable_format(physical_device, surface, &surface_instance_fns)?;
+    let format = get_suitable_format(physical_device, &surface)?;
     let render_pass = create_render_pass(&device, format.format)?;
 
-    let surface_capabilities = unsafe {
-        surface_instance_fns.get_physical_device_surface_capabilities(physical_device, surface)?
-    };
+    let surface_capabilities =
+        surface.get_physical_device_surface_capabilities_khr(physical_device)?;
     let mut extent = surface_capabilities.current_extent;
 
-    let mut swapchain = Swapchain::new(&instance, &device, surface, render_pass, format, extent)?;
+    let mut swapchain = Swapchain::new(
+        &instance,
+        &device,
+        surface.surface,
+        render_pass,
+        format,
+        extent,
+    )?;
 
     let queue = unsafe { device.get_device_queue(0, 0) };
 
     let pipeline_layout = create_pipeline_layout(&device)?;
 
-    let vert_module = create_shader_module(&device, "examples/shaders/triangle.vert.spv")?;
-    let frag_module = create_shader_module(&device, "examples/shaders/triangle.frag.spv")?;
+    let vert_module = create_shader_module(&device, "shaders/triangle.vert.spv")?;
+    let frag_module = create_shader_module(&device, "shaders/triangle.frag.spv")?;
     let graphics_pipeline = create_graphics_pipeline(
         &device,
         render_pass,
@@ -567,10 +548,8 @@ fn main() -> anyhow::Result<()> {
     let fence = create_fence(&device)?;
 
     while !window.should_close() {
-        let surface_capabilities = unsafe {
-            surface_instance_fns
-                .get_physical_device_surface_capabilities(physical_device, surface)?
-        };
+        let surface_capabilities =
+            surface.get_physical_device_surface_capabilities_khr(physical_device)?;
 
         if surface_capabilities.current_extent.width != extent.width
             || surface_capabilities.current_extent.height != extent.height
@@ -579,7 +558,7 @@ fn main() -> anyhow::Result<()> {
                 device.device_wait_idle()?;
             }
             extent = surface_capabilities.current_extent;
-            swapchain = swapchain.recreate(surface, render_pass, format, extent)?;
+            swapchain = swapchain.recreate(surface.surface, render_pass, format, extent)?;
 
             unsafe {
                 device.destroy_semaphore(acquire_semaphore, None);
@@ -713,7 +692,7 @@ fn main() -> anyhow::Result<()> {
                 .wait_dst_stage_mask(stage_flags);
             device.queue_submit(queue, &[submit_info], fence)?;
 
-            let swapchains = &[swapchain.handle()];
+            let swapchains = &[swapchain.swapchain()];
             let present_info = vk::PresentInfoKHR::default()
                 .image_indices(images)
                 .swapchains(swapchains)
@@ -744,14 +723,15 @@ fn main() -> anyhow::Result<()> {
 
         device.destroy_pipeline(graphics_pipeline, None);
         device.destroy_pipeline_layout(pipeline_layout, None);
-        swapchain.destroy_swapchain();
+        swapchain.destroy();
         device.destroy_render_pass(render_pass, None);
-        surface_instance_fns.destroy_surface(surface, None);
+
         device.destroy_device(None);
 
         if let Some((debug_fns, debug_callback)) = debug_instance_fns {
             debug_fns.destroy_debug_utils_messenger(debug_callback, None);
         }
+        surface.destroy();
         instance.destroy_instance(None);
     }
     Ok(())

@@ -1,6 +1,5 @@
 use ash::{khr, vk, Entry, Instance};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
-use std::sync::Arc;
 
 pub struct Surface {
     pub surface: vk::SurfaceKHR,
@@ -11,11 +10,11 @@ pub struct Surface {
 impl Surface {
     pub fn new(
         entry: &Entry,
-        instance: Arc<Instance>,
+        instance: &Instance,
         handle: &(impl HasDisplayHandle + HasWindowHandle),
     ) -> anyhow::Result<Self> {
         unsafe {
-            let loader = khr::surface::Instance::new(&entry, &instance);
+            let loader = khr::surface::Instance::new(entry, instance);
 
             let raw_display_handle = handle
                 .display_handle()
@@ -28,7 +27,7 @@ impl Surface {
 
             let surface = ash_window::create_surface(
                 entry,
-                &instance,
+                instance,
                 raw_display_handle,
                 raw_window_handle,
                 None,
@@ -38,7 +37,13 @@ impl Surface {
         }
     }
 
-    fn get_physical_device_surface_support_khr(
+    pub fn destroy(&self) {
+        unsafe {
+            self.loader.destroy_surface(self.surface, None);
+        }
+    }
+
+    pub fn get_physical_device_surface_support_khr(
         &self,
         physical_device: vk::PhysicalDevice,
         queue_family_index: u32,
@@ -51,7 +56,7 @@ impl Surface {
             )?)
         }
     }
-    fn get_physical_device_surface_capabilities_khr(
+    pub fn get_physical_device_surface_capabilities_khr(
         &self,
         physical_device: vk::PhysicalDevice,
     ) -> anyhow::Result<vk::SurfaceCapabilitiesKHR> {
@@ -62,7 +67,7 @@ impl Surface {
         }
     }
 
-    fn get_physical_device_surface_formats_khr(
+    pub fn get_physical_device_surface_formats_khr(
         &self,
         physical_device: vk::PhysicalDevice,
     ) -> anyhow::Result<Vec<vk::SurfaceFormatKHR>> {
@@ -73,7 +78,7 @@ impl Surface {
         }
     }
 
-    fn get_physical_device_surface_present_modes_khr(
+    pub fn get_physical_device_surface_present_modes_khr(
         &self,
         physical_device: vk::PhysicalDevice,
     ) -> anyhow::Result<Vec<vk::PresentModeKHR>> {
