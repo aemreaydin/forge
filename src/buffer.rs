@@ -6,17 +6,31 @@ pub trait DeviceHandled {
     fn device(&self) -> &Device;
 }
 
-#[derive(Clone, Copy, Default, Debug)]
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
 pub struct Vertex {
-    pub position: [f32; 3],
-    pub normal: [f32; 3],
-    pub tex_coords: [f32; 2],
+    pub position: nalgebra_glm::Vec4,
+    pub normal: nalgebra_glm::Vec4,
+    pub tex_coords: nalgebra_glm::Vec2,
+    pub _padding: nalgebra_glm::Vec2, // TODO: I'm not too bored to remove this
+}
+
+impl Default for Vertex {
+    fn default() -> Self {
+        Self {
+            position: nalgebra_glm::Vec4::new(0.0, 0.0, 0.0, 1.0),
+            normal: nalgebra_glm::Vec4::new(0.0, 0.0, 0.0, 1.0),
+            tex_coords: nalgebra_glm::Vec2::new(0.0, 0.0),
+            _padding: nalgebra_glm::Vec2::new(0.0, 0.0),
+        }
+    }
 }
 
 pub struct Buffer<T> {
     pub buffer: vk::Buffer,
     pub memory: vk::DeviceMemory,
     pub data: Vec<T>,
+    pub size: u64,
 
     device: Device,
 }
@@ -62,6 +76,7 @@ impl<T> Buffer<T> {
                 buffer,
                 memory,
                 data,
+                size,
                 device: device.clone(),
             })
         }
@@ -71,5 +86,16 @@ impl<T> Buffer<T> {
 impl<T> DeviceHandled for Buffer<T> {
     fn device(&self) -> &Device {
         &self.device
+    }
+}
+
+impl<T: std::fmt::Debug> std::fmt::Debug for Buffer<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Buffer")
+            .field("buffer", &self.buffer)
+            .field("memory", &self.memory)
+            .field("size", &self.size)
+            .field("data", &self.data)
+            .finish()
     }
 }

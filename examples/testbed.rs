@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Context};
-use ash::{ext, khr, mvk, vk, Device, Entry, Instance};
+use ash::{ext, khr, vk, Device, Entry, Instance};
 use forge::{buffer::Buffer, surface::Surface};
 use glfw::{Action, Context as GlfwContext, Key};
 use std::path::Path;
@@ -177,6 +177,7 @@ fn get_required_device_extensions(
     instance: &Instance,
     physical_device: &vk::PhysicalDevice,
 ) -> anyhow::Result<Vec<*const i8>> {
+    #[allow(unused_mut)]
     let mut required_extensions = vec![
         vk::KHR_SWAPCHAIN_NAME.as_ptr(),
         vk::KHR_PUSH_DESCRIPTOR_NAME.as_ptr(),
@@ -431,21 +432,23 @@ fn create_graphics_pipeline(
     }
 }
 
-fn create_pipeline_layout(device: &Device) -> anyhow::Result<vk::PipelineLayout> {
+fn create_pipeline_layout(
+    device: &Device,
+) -> anyhow::Result<(vk::PipelineLayout, vk::DescriptorSetLayout)> {
     let bindings = &[vk::DescriptorSetLayoutBinding::default()
         .binding(0)
         .descriptor_count(1)
         .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
         .stage_flags(vk::ShaderStageFlags::VERTEX)];
-    let set_create_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(bindings);
+    let set_create_info = vk::DescriptorSetLayoutCreateInfo::default()
+        .bindings(bindings)
+        .flags(vk::DescriptorSetLayoutCreateFlags::PUSH_DESCRIPTOR_KHR);
     let set_layout = unsafe { device.create_descriptor_set_layout(&set_create_info, None)? };
     let set_layouts = &[set_layout];
     let create_info = vk::PipelineLayoutCreateInfo::default().set_layouts(set_layouts);
     let pipeline_layout = unsafe { device.create_pipeline_layout(&create_info, None)? };
 
-    unsafe { device.destroy_descriptor_set_layout(set_layout, None) };
-
-    Ok(pipeline_layout)
+    Ok((pipeline_layout, set_layout))
 }
 // TODO: Macos doesn't support this but keep it for the future
 // fn create_shader_object<P: AsRef<Path>>(
@@ -543,7 +546,7 @@ fn main() -> anyhow::Result<()> {
 
     let queue = unsafe { device.get_device_queue(0, 0) };
 
-    let pipeline_layout = create_pipeline_layout(&device)?;
+    let (pipeline_layout, descriptor_set_layout) = create_pipeline_layout(&device)?;
 
     let vert_module = create_shader_module(&device, "shaders/triangle.vert.spv")?;
     let frag_module = create_shader_module(&device, "shaders/triangle.frag.spv")?;
@@ -568,18 +571,18 @@ fn main() -> anyhow::Result<()> {
 
     let triangle = Vec::from_iter([
         Vertex {
-            position: [0.0, 0.5, 0.0],
-            normal: [1.0, 0.0, 0.0],
+            position: [0.0, 0.5, 0.0, 1.0].into(),
+            normal: [1.0, 0.0, 0.0, 1.0].into(),
             ..Default::default()
         },
         Vertex {
-            position: [0.5, -0.5, 0.0],
-            normal: [0.0, 1.0, 0.0],
+            position: [0.5, -0.5, 0.0, 1.0].into(),
+            normal: [0.0, 1.0, 0.0, 1.0].into(),
             ..Default::default()
         },
         Vertex {
-            position: [-0.5, -0.5, 0.0],
-            normal: [0.0, 0.0, 1.0],
+            position: [-0.5, -0.5, 0.0, 1.0].into(),
+            normal: [0.0, 0.0, 1.0, 1.0].into(),
             ..Default::default()
         },
     ]);
@@ -589,7 +592,7 @@ fn main() -> anyhow::Result<()> {
         &device,
         memory_properties,
         vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-        vk::BufferUsageFlags::VERTEX_BUFFER,
+        vk::BufferUsageFlags::STORAGE_BUFFER,
         triangle,
     )?;
 
@@ -705,8 +708,9 @@ fn main() -> anyhow::Result<()> {
             let buffer_info = &[vk::DescriptorBufferInfo::default()
                 .buffer(vertex_buffer.buffer)
                 .offset(0)
-                .range(vertex_buffer.data.len() as u64)];
+                .range(vertex_buffer.size)];
             let descriptor_writes = &[vk::WriteDescriptorSet::default()
+                .descriptor_count(1)
                 .dst_binding(0)
                 .buffer_info(buffer_info)
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)];
@@ -805,7 +809,9 @@ fn main() -> anyhow::Result<()> {
         device.destroy_command_pool(command_pool, None);
 
         device.destroy_pipeline(graphics_pipeline, None);
+        device.destroy_descriptor_set_layout(descriptor_set_layout, None);
         device.destroy_pipeline_layout(pipeline_layout, None);
+
         swapchain.destroy();
         device.destroy_render_pass(render_pass, None);
 
