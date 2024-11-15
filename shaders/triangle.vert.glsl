@@ -1,12 +1,19 @@
 #version 450
 
-layout(location = 0) in vec3 position;
-layout(location = 1) in vec3 normal;
-layout(location = 2) in vec3 tex_coords;
+struct Vertex {
+    vec3 position;
+    vec3 normal;
+    vec2 tex_coords;
+};
+
+layout(binding = 0) readonly buffer Vertices {
+    Vertex vertices[];
+};
 
 layout(location = 0) out vec3 outColor;
 
 void main() {
-    outColor = normal;
-    gl_Position = vec4(position, 1.0);
+    Vertex vertex = vertices[gl_VertexIndex];
+    outColor = vertex.normal;
+    gl_Position = vec4(vertex.position, 1.0);
 }

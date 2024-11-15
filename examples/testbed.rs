@@ -1,15 +1,11 @@
 use anyhow::{anyhow, Context};
-use ash::{
-    ext, khr, mvk,
-    vk::{self, EXT_DEBUG_UTILS_NAME, KHR_SWAPCHAIN_NAME},
-    Device, Entry, Instance,
-};
+use ash::{ext, khr, vk, Device, Entry, Instance};
 use forge::{buffer::Buffer, surface::Surface};
-use forge::{buffer::Vertex, swapchain::Swapchain};
 use glfw::{Action, Context as GlfwContext, Key};
-use std::{mem::offset_of, path::Path};
+use std::path::Path;
 
 const VALIDATION_ENABLED: bool = cfg!(debug_assertions);
+use forge::{buffer::Vertex, swapchain::Swapchain};
 const VALIDATION_LAYER: &std::ffi::CStr =
     unsafe { std::ffi::CStr::from_bytes_with_nul_unchecked(b"VK_LAYER_KHRONOS_validation\0") };
 
@@ -154,8 +150,8 @@ fn get_required_layers(entry: &Entry) -> anyhow::Result<Vec<*const i8>> {
 fn get_required_instance_extensions(entry: &Entry) -> anyhow::Result<Vec<*const i8>> {
     let mut required_extensions = vec![khr::surface::NAME.as_ptr()];
     if VALIDATION_ENABLED {
-        required_extensions.push(EXT_DEBUG_UTILS_NAME.as_ptr());
-        log::info!("Adding {:?}", EXT_DEBUG_UTILS_NAME);
+        required_extensions.push(vk::EXT_DEBUG_UTILS_NAME.as_ptr());
+        log::info!("Adding {:?}", vk::EXT_DEBUG_UTILS_NAME);
     }
     required_extensions.extend_from_slice(REQUIRED_INSTANCE_EXTENSIONS);
     let system_extension_names = unsafe {
@@ -181,7 +177,11 @@ fn get_required_device_extensions(
     instance: &Instance,
     physical_device: &vk::PhysicalDevice,
 ) -> anyhow::Result<Vec<*const i8>> {
-    let mut required_extensions = vec![KHR_SWAPCHAIN_NAME.as_ptr()];
+    #[allow(unused_mut)]
+    let mut required_extensions = vec![
+        vk::KHR_SWAPCHAIN_NAME.as_ptr(),
+        vk::KHR_PUSH_DESCRIPTOR_NAME.as_ptr(),
+    ];
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     required_extensions.extend_from_slice(MACOS_REQUIRED_DEVICE_EXTENSIONS);
 
@@ -362,34 +362,7 @@ fn create_graphics_pipeline(
             .name(name),
     ];
 
-    let vertex_binding_descriptions = &[vk::VertexInputBindingDescription {
-        binding: 0,
-        stride: std::mem::size_of::<Vertex>() as u32,
-        input_rate: vk::VertexInputRate::VERTEX,
-    }];
-    let vertex_attribute_descriptions = &[
-        vk::VertexInputAttributeDescription {
-            location: 0,
-            binding: 0,
-            format: vk::Format::R32G32B32_SFLOAT,
-            offset: offset_of!(Vertex, position) as u32,
-        },
-        vk::VertexInputAttributeDescription {
-            location: 1,
-            binding: 0,
-            format: vk::Format::R32G32B32_SFLOAT,
-            offset: offset_of!(Vertex, normal) as u32,
-        },
-        vk::VertexInputAttributeDescription {
-            location: 2,
-            binding: 0,
-            format: vk::Format::R32G32_SFLOAT,
-            offset: offset_of!(Vertex, tex_coords) as u32,
-        },
-    ];
-    let vertex_state = vk::PipelineVertexInputStateCreateInfo::default()
-        .vertex_binding_descriptions(vertex_binding_descriptions)
-        .vertex_attribute_descriptions(vertex_attribute_descriptions);
+    let vertex_state = vk::PipelineVertexInputStateCreateInfo::default();
 
     let input_assembly_state = vk::PipelineInputAssemblyStateCreateInfo::default()
         .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
@@ -459,9 +432,23 @@ fn create_graphics_pipeline(
     }
 }
 
-fn create_pipeline_layout(device: &Device) -> anyhow::Result<vk::PipelineLayout> {
-    let create_info = vk::PipelineLayoutCreateInfo::default();
-    Ok(unsafe { device.create_pipeline_layout(&create_info, None)? })
+fn create_pipeline_layout(
+    device: &Device,
+) -> anyhow::Result<(vk::PipelineLayout, vk::DescriptorSetLayout)> {
+    let bindings = &[vk::DescriptorSetLayoutBinding::default()
+        .binding(0)
+        .descriptor_count(1)
+        .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+        .stage_flags(vk::ShaderStageFlags::VERTEX)];
+    let set_create_info = vk::DescriptorSetLayoutCreateInfo::default()
+        .bindings(bindings)
+        .flags(vk::DescriptorSetLayoutCreateFlags::PUSH_DESCRIPTOR_KHR);
+    let set_layout = unsafe { device.create_descriptor_set_layout(&set_create_info, None)? };
+    let set_layouts = &[set_layout];
+    let create_info = vk::PipelineLayoutCreateInfo::default().set_layouts(set_layouts);
+    let pipeline_layout = unsafe { device.create_pipeline_layout(&create_info, None)? };
+
+    Ok((pipeline_layout, set_layout))
 }
 // TODO: Macos doesn't support this but keep it for the future
 // fn create_shader_object<P: AsRef<Path>>(
@@ -539,6 +526,8 @@ fn main() -> anyhow::Result<()> {
     let memory_properties =
         unsafe { instance.get_physical_device_memory_properties(physical_device) };
 
+    let push_desc_loader = khr::push_descriptor::Device::new(&instance, &device);
+
     let format = get_suitable_format(physical_device, &surface)?;
     let render_pass = create_render_pass(&device, format.format)?;
 
@@ -557,7 +546,7 @@ fn main() -> anyhow::Result<()> {
 
     let queue = unsafe { device.get_device_queue(0, 0) };
 
-    let pipeline_layout = create_pipeline_layout(&device)?;
+    let (pipeline_layout, descriptor_set_layout) = create_pipeline_layout(&device)?;
 
     let vert_module = create_shader_module(&device, "shaders/triangle.vert.spv")?;
     let frag_module = create_shader_module(&device, "shaders/triangle.frag.spv")?;
@@ -582,18 +571,18 @@ fn main() -> anyhow::Result<()> {
 
     let triangle = Vec::from_iter([
         Vertex {
-            position: [0.0, 0.5, 0.0],
-            normal: [1.0, 0.0, 0.0],
+            position: [0.0, 0.5, 0.0, 1.0].into(),
+            normal: [1.0, 0.0, 0.0, 1.0].into(),
             ..Default::default()
         },
         Vertex {
-            position: [0.5, -0.5, 0.0],
-            normal: [0.0, 1.0, 0.0],
+            position: [0.5, -0.5, 0.0, 1.0].into(),
+            normal: [0.0, 1.0, 0.0, 1.0].into(),
             ..Default::default()
         },
         Vertex {
-            position: [-0.5, -0.5, 0.0],
-            normal: [0.0, 0.0, 1.0],
+            position: [-0.5, -0.5, 0.0, 1.0].into(),
+            normal: [0.0, 0.0, 1.0, 1.0].into(),
             ..Default::default()
         },
     ]);
@@ -603,7 +592,7 @@ fn main() -> anyhow::Result<()> {
         &device,
         memory_properties,
         vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-        vk::BufferUsageFlags::VERTEX_BUFFER,
+        vk::BufferUsageFlags::STORAGE_BUFFER,
         triangle,
     )?;
 
@@ -716,7 +705,24 @@ fn main() -> anyhow::Result<()> {
                 graphics_pipeline,
             );
 
-            device.cmd_bind_vertex_buffers(command_buffer, 0, &[vertex_buffer.buffer], &[0]);
+            let buffer_info = &[vk::DescriptorBufferInfo::default()
+                .buffer(vertex_buffer.buffer)
+                .offset(0)
+                .range(vertex_buffer.size)];
+            let descriptor_writes = &[vk::WriteDescriptorSet::default()
+                .descriptor_count(1)
+                .dst_binding(0)
+                .buffer_info(buffer_info)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)];
+
+            push_desc_loader.cmd_push_descriptor_set(
+                command_buffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                pipeline_layout,
+                0,
+                descriptor_writes,
+            );
+
             device.cmd_bind_index_buffer(
                 command_buffer,
                 index_buffer.buffer,
@@ -803,7 +809,9 @@ fn main() -> anyhow::Result<()> {
         device.destroy_command_pool(command_pool, None);
 
         device.destroy_pipeline(graphics_pipeline, None);
+        device.destroy_descriptor_set_layout(descriptor_set_layout, None);
         device.destroy_pipeline_layout(pipeline_layout, None);
+
         swapchain.destroy();
         device.destroy_render_pass(render_pass, None);
 
