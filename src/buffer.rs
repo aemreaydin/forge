@@ -46,7 +46,7 @@ impl<T> Buffer<T> {
                         && (mem_req.memory_type_bits & (1 << ind)) != 0
                 })
                 .context("failed to find a suitable memory type index")?;
-            println!("Picking memory index {}.", mem_index);
+            log::trace!("Picking memory index {}.", mem_index);
 
             let allocate_info = vk::MemoryAllocateInfo::default()
                 .allocation_size(mem_req.size)

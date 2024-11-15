@@ -22,6 +22,8 @@ const REQUIRED_INSTANCE_EXTENSIONS: &[*const i8] = &[
 ];
 #[cfg(target_os = "linux")]
 const REQUIRED_INSTANCE_EXTENSIONS: &[*const i8] = &[khr::xlib_surface::NAME.as_ptr()];
+#[cfg(target_os = "windows")]
+const REQUIRED_INSTANCE_EXTENSIONS: &[*const i8] = &[khr::win32_surface::NAME.as_ptr()];
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 const MACOS_REQUIRED_DEVICE_EXTENSIONS: &[*const i8] = &[
