@@ -11,7 +11,9 @@ bytemuck = { version = "1.19.0", features = ["extern_crate_std"] }
 env_logger = "0.11.5"
 glfw = "0.58.0"
 log = "0.4.22"
+meshopt = "0.4.0"
 raw-window-handle = "0.6.2"
+tobj = "4.0.2"
 
 [build-dependencies]
 anyhow = "1.0.92"

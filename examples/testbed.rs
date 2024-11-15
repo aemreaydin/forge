@@ -4,10 +4,10 @@ use ash::{
     vk::{self, EXT_DEBUG_UTILS_NAME, KHR_SWAPCHAIN_NAME},
     Device, Entry, Instance,
 };
-use forge::surface::Surface;
-use forge::swapchain::Swapchain;
+use forge::{buffer::Buffer, surface::Surface};
+use forge::{buffer::Vertex, swapchain::Swapchain};
 use glfw::{Action, Context as GlfwContext, Key};
-use std::path::Path;
+use std::{mem::offset_of, path::Path};
 
 const VALIDATION_ENABLED: bool = cfg!(debug_assertions);
 const VALIDATION_LAYER: &std::ffi::CStr =
@@ -359,7 +359,36 @@ fn create_graphics_pipeline(
             .module(frag_module)
             .name(name),
     ];
-    let vertex_state = vk::PipelineVertexInputStateCreateInfo::default();
+
+    let vertex_binding_descriptions = &[vk::VertexInputBindingDescription {
+        binding: 0,
+        stride: std::mem::size_of::<Vertex>() as u32,
+        input_rate: vk::VertexInputRate::VERTEX,
+    }];
+    let vertex_attribute_descriptions = &[
+        vk::VertexInputAttributeDescription {
+            location: 0,
+            binding: 0,
+            format: vk::Format::R32G32B32_SFLOAT,
+            offset: offset_of!(Vertex, position) as u32,
+        },
+        vk::VertexInputAttributeDescription {
+            location: 1,
+            binding: 0,
+            format: vk::Format::R32G32B32_SFLOAT,
+            offset: offset_of!(Vertex, normal) as u32,
+        },
+        vk::VertexInputAttributeDescription {
+            location: 2,
+            binding: 0,
+            format: vk::Format::R32G32_SFLOAT,
+            offset: offset_of!(Vertex, tex_coords) as u32,
+        },
+    ];
+    let vertex_state = vk::PipelineVertexInputStateCreateInfo::default()
+        .vertex_binding_descriptions(vertex_binding_descriptions)
+        .vertex_attribute_descriptions(vertex_attribute_descriptions);
+
     let input_assembly_state = vk::PipelineInputAssemblyStateCreateInfo::default()
         .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
     let tesselation_state = vk::PipelineTessellationStateCreateInfo::default();
@@ -505,6 +534,8 @@ fn main() -> anyhow::Result<()> {
     let surface = Surface::new(&entry, &instance, &window)?;
     let physical_device = create_physical_device(&instance, &surface)?;
     let device = create_device(&instance, &physical_device)?;
+    let memory_properties =
+        unsafe { instance.get_physical_device_memory_properties(physical_device) };
 
     let format = get_suitable_format(physical_device, &surface)?;
     let render_pass = create_render_pass(&device, format.format)?;
@@ -546,6 +577,41 @@ fn main() -> anyhow::Result<()> {
     let mut acquire_semaphore = create_semaphore(&device)?;
     let mut present_semaphore = create_semaphore(&device)?;
     let fence = create_fence(&device)?;
+
+    let triangle = Vec::from_iter([
+        Vertex {
+            position: [0.0, 0.5, 0.0],
+            normal: [1.0, 0.0, 0.0],
+            ..Default::default()
+        },
+        Vertex {
+            position: [0.5, -0.5, 0.0],
+            normal: [0.0, 1.0, 0.0],
+            ..Default::default()
+        },
+        Vertex {
+            position: [-0.5, -0.5, 0.0],
+            normal: [0.0, 0.0, 1.0],
+            ..Default::default()
+        },
+    ]);
+    let indices = vec![0, 1, 2];
+
+    let vertex_buffer = Buffer::from_data(
+        &device,
+        memory_properties,
+        vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        vk::BufferUsageFlags::VERTEX_BUFFER,
+        triangle,
+    )?;
+
+    let index_buffer = Buffer::from_data(
+        &device,
+        memory_properties,
+        vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        vk::BufferUsageFlags::INDEX_BUFFER,
+        indices,
+    )?;
 
     while !window.should_close() {
         let surface_capabilities =
@@ -648,7 +714,14 @@ fn main() -> anyhow::Result<()> {
                 graphics_pipeline,
             );
 
-            device.cmd_draw(command_buffer, 3, 1, 0, 0);
+            device.cmd_bind_vertex_buffers(command_buffer, 0, &[vertex_buffer.buffer], &[0]);
+            device.cmd_bind_index_buffer(
+                command_buffer,
+                index_buffer.buffer,
+                0,
+                vk::IndexType::UINT32,
+            );
+            device.cmd_draw_indexed(command_buffer, index_buffer.data.len() as u32, 1, 0, 0, 0);
 
             // let subresource_range = vk::ImageSubresourceRange {
             //     aspect_mask: vk::ImageAspectFlags::COLOR,
@@ -713,6 +786,12 @@ fn main() -> anyhow::Result<()> {
 
     unsafe {
         device.device_wait_idle()?;
+
+        device.free_memory(vertex_buffer.memory, None);
+        device.destroy_buffer(vertex_buffer.buffer, None);
+
+        device.free_memory(index_buffer.memory, None);
+        device.destroy_buffer(index_buffer.buffer, None);
 
         device.destroy_fence(fence, None);
         device.destroy_semaphore(acquire_semaphore, None);
