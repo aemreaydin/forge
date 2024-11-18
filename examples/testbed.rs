@@ -1,9 +1,10 @@
 use anyhow::{anyhow, Context};
 use ash::{ext, khr, mvk, vk, Device, Entry, Instance};
+use core::f32;
 use forge::{buffer::Buffer, surface::Surface};
 use glfw::{Action, Context as GlfwContext, Key};
-use nalgebra_glm::{Vec2, Vec4};
-use std::path::Path;
+use nalgebra_glm::{Vec2, Vec3, Vec4};
+use std::{f32::consts::PI, path::Path};
 use tobj::LoadOptions;
 
 const VALIDATION_ENABLED: bool = cfg!(debug_assertions);
@@ -472,7 +473,7 @@ fn create_pipeline_layout(
     let push_constant_ranges = &[vk::PushConstantRange::default()
         .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
         .offset(0)
-        .size(size_of::<u64>() as u32)];
+        .size(size_of::<nalgebra_glm::Mat4>() as u32)];
     let bindings = &[vk::DescriptorSetLayoutBinding::default()
         .binding(0)
         .descriptor_count(1)
@@ -847,15 +848,34 @@ fn main() -> anyhow::Result<()> {
                 0,
                 vk::IndexType::UINT32,
             );
+
             let time = start_time.elapsed().as_secs_f32();
+            let model = nalgebra_glm::rotate(
+                &nalgebra_glm::Mat4::identity(),
+                time,
+                &Vec3::new(1.0, 1.0, 0.0),
+            );
+            let projection = nalgebra_glm::perspective_fov_rh_zo(
+                f32::to_radians(45.0),
+                extent.width as f32,
+                extent.height as f32,
+                0.01,
+                10.0,
+            );
+            let view = nalgebra_glm::look_at_rh(
+                &Vec3::new(0.0, 0.0, -1.0),
+                &Vec3::default(),
+                &Vec3::new(0.0, 1.0, 0.0),
+            );
+            let mvp = projection * view * model;
             device.cmd_push_constants(
                 command_buffer,
                 pipeline_layout,
                 vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, // same as above
                 0,
                 std::slice::from_raw_parts(
-                    &time as *const f32 as *const u8,
-                    std::mem::size_of::<f32>(),
+                    mvp.as_ptr() as *const u8,
+                    std::mem::size_of::<nalgebra_glm::Mat4>(),
                 ),
             );
             device.cmd_draw_indexed(command_buffer, index_buffer.data.len() as u32, 1, 0, 0, 0);

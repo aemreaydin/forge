@@ -256,6 +256,7 @@ impl Swapchain {
             .format(vk::Format::D32_SFLOAT)
             .extent(extent)
             .mip_levels(1)
+            .tiling(vk::ImageTiling::OPTIMAL)
             .array_layers(1)
             .samples(vk::SampleCountFlags::TYPE_1)
             .usage(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT)
