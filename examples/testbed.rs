@@ -2,7 +2,9 @@ use anyhow::{anyhow, Context};
 use ash::{ext, khr, mvk, vk, Device, Entry, Instance};
 use forge::{buffer::Buffer, surface::Surface};
 use glfw::{Action, Context as GlfwContext, Key};
+use nalgebra_glm::{Vec2, Vec4};
 use std::path::Path;
+use tobj::LoadOptions;
 
 const VALIDATION_ENABLED: bool = cfg!(debug_assertions);
 use forge::{buffer::Vertex, swapchain::Swapchain};
@@ -310,21 +312,47 @@ fn create_render_pass(device: &Device, format: vk::Format) -> anyhow::Result<vk:
         .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
         .initial_layout(vk::ImageLayout::UNDEFINED)
         .final_layout(vk::ImageLayout::PRESENT_SRC_KHR);
-    let descs = &[color_desc];
+    let depth_desc = vk::AttachmentDescription::default()
+        .format(vk::Format::D32_SFLOAT)
+        .samples(vk::SampleCountFlags::TYPE_1)
+        .load_op(vk::AttachmentLoadOp::CLEAR)
+        .store_op(vk::AttachmentStoreOp::DONT_CARE)
+        .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+        .stencil_store_op(vk::AttachmentStoreOp::STORE)
+        .initial_layout(vk::ImageLayout::UNDEFINED)
+        .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+    let descs = &[color_desc, depth_desc];
 
-    let color_ref = vk::AttachmentReference::default()
+    let color_refs = &[vk::AttachmentReference::default()
         .attachment(0)
-        .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
-    let refs = &[color_ref];
+        .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)];
+    let depth_refs = vk::AttachmentReference::default()
+        .attachment(1)
+        .layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
 
     let color_subpass = vk::SubpassDescription::default()
         .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
-        .color_attachments(refs);
+        .color_attachments(color_refs)
+        .depth_stencil_attachment(&depth_refs);
     let subpasses = &[color_subpass];
-
+    let dependencies = &[vk::SubpassDependency::default()
+        .src_subpass(vk::SUBPASS_EXTERNAL)
+        .src_stage_mask(
+            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+                | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
+        )
+        .dst_stage_mask(
+            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+                | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
+        )
+        .dst_access_mask(
+            vk::AccessFlags::COLOR_ATTACHMENT_WRITE
+                | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+        )];
     let create_info = vk::RenderPassCreateInfo::default()
         .attachments(descs)
-        .subpasses(subpasses);
+        .subpasses(subpasses)
+        .dependencies(dependencies);
 
     Ok(unsafe { device.create_render_pass(&create_info, None)? })
 }
@@ -369,7 +397,12 @@ fn create_graphics_pipeline(
     let tesselation_state = vk::PipelineTessellationStateCreateInfo::default();
     let multisample_state = vk::PipelineMultisampleStateCreateInfo::default()
         .rasterization_samples(vk::SampleCountFlags::TYPE_1);
-    let depth_stencil_state = vk::PipelineDepthStencilStateCreateInfo::default();
+    let depth_stencil_state = vk::PipelineDepthStencilStateCreateInfo::default()
+        .depth_test_enable(true)
+        .depth_compare_op(vk::CompareOp::LESS)
+        .depth_write_enable(true)
+        .min_depth_bounds(0.0)
+        .max_depth_bounds(1.0);
 
     let color_attachment_states = &[vk::PipelineColorBlendAttachmentState::default()
         .color_write_mask(
@@ -383,7 +416,8 @@ fn create_graphics_pipeline(
 
     let rasterization_state = vk::PipelineRasterizationStateCreateInfo::default()
         .line_width(1.0)
-        .front_face(vk::FrontFace::CLOCKWISE);
+        .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
+        .cull_mode(vk::CullModeFlags::BACK);
 
     let viewport_state = vk::PipelineViewportStateCreateInfo::default()
         .viewport_count(1)
@@ -435,6 +469,10 @@ fn create_graphics_pipeline(
 fn create_pipeline_layout(
     device: &Device,
 ) -> anyhow::Result<(vk::PipelineLayout, vk::DescriptorSetLayout)> {
+    let push_constant_ranges = &[vk::PushConstantRange::default()
+        .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
+        .offset(0)
+        .size(size_of::<u64>() as u32)];
     let bindings = &[vk::DescriptorSetLayoutBinding::default()
         .binding(0)
         .descriptor_count(1)
@@ -445,7 +483,9 @@ fn create_pipeline_layout(
         .flags(vk::DescriptorSetLayoutCreateFlags::PUSH_DESCRIPTOR_KHR);
     let set_layout = unsafe { device.create_descriptor_set_layout(&set_create_info, None)? };
     let set_layouts = &[set_layout];
-    let create_info = vk::PipelineLayoutCreateInfo::default().set_layouts(set_layouts);
+    let create_info = vk::PipelineLayoutCreateInfo::default()
+        .set_layouts(set_layouts)
+        .push_constant_ranges(push_constant_ranges);
     let pipeline_layout = unsafe { device.create_pipeline_layout(&create_info, None)? };
 
     Ok((pipeline_layout, set_layout))
@@ -481,8 +521,38 @@ fn create_pipeline_layout(
 //         })?
 // }
 //
+pub fn normalize_mesh(vertices: &mut [Vertex]) {
+    let mut positions = vertices.iter_mut().map(|v| v.position).collect::<Vec<_>>();
+    if positions.is_empty() {
+        return;
+    }
 
+    // Find bounding box
+    let mut min = positions[0];
+    let mut max = positions[0];
+
+    for vertex in positions.iter() {
+        min = nalgebra_glm::min2(&min, vertex);
+        max = nalgebra_glm::max2(&max, vertex);
+    }
+
+    // Calculate center and scale
+    let center = (max + min) * 0.5;
+    let scale = (max - min).max() * 0.5;
+
+    // Normalize vertices
+    for vertex in positions.iter_mut() {
+        *vertex = (*vertex - center) / scale;
+    }
+    vertices
+        .iter_mut()
+        .enumerate()
+        .for_each(|(ind, v)| v.position = positions[ind]);
+}
 fn main() -> anyhow::Result<()> {
+    let mesh_path = std::env::args()
+        .nth(1)
+        .context("Failed to get a mesh path from args")?;
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
         .format_target(false)
         .format_indent(None)
@@ -540,6 +610,7 @@ fn main() -> anyhow::Result<()> {
         &device,
         surface.surface,
         render_pass,
+        memory_properties,
         format,
         extent,
     )?;
@@ -569,31 +640,63 @@ fn main() -> anyhow::Result<()> {
     let mut present_semaphore = create_semaphore(&device)?;
     let fence = create_fence(&device)?;
 
-    let triangle = Vec::from_iter([
-        Vertex {
-            position: [0.0, 0.5, 0.0, 1.0].into(),
-            normal: [1.0, 0.0, 0.0, 1.0].into(),
+    let (models, _materials) = tobj::load_obj(
+        mesh_path,
+        &LoadOptions {
+            triangulate: true,
+            single_index: true,
             ..Default::default()
         },
-        Vertex {
-            position: [0.5, -0.5, 0.0, 1.0].into(),
-            normal: [0.0, 1.0, 0.0, 1.0].into(),
-            ..Default::default()
-        },
-        Vertex {
-            position: [-0.5, -0.5, 0.0, 1.0].into(),
-            normal: [0.0, 0.0, 1.0, 1.0].into(),
-            ..Default::default()
-        },
-    ]);
-    let indices = vec![0, 1, 2];
+    )?;
+
+    let (vertices, indices) = {
+        let model = models.first().context("Failed to get the model")?;
+        let mesh = &model.mesh;
+
+        let mut vertices = Vec::new();
+        let indices = mesh.indices.clone();
+
+        let positions = mesh.positions.as_slice();
+        let normals = mesh.normals.as_slice();
+        let texcoords = mesh.texcoords.as_slice();
+
+        let vertex_count = positions.len() / 3;
+
+        for i in 0..vertex_count {
+            let position = Vec4::new(
+                positions[i * 3],
+                positions[i * 3 + 1],
+                positions[i * 3 + 2],
+                1.0,
+            );
+            let normal = if !mesh.normals.is_empty() {
+                Vec4::new(normals[i * 3], normals[i * 3 + 1], normals[i * 3 + 2], 1.0)
+            } else {
+                [0.0, 0.0, 0.0, 1.0].into()
+            };
+            let tex_coords = if !mesh.texcoords.is_empty() {
+                Vec2::new(texcoords[i * 3], texcoords[i * 3 + 1])
+            } else {
+                [0.0, 0.0].into()
+            };
+            let vertex = Vertex {
+                position,
+                normal,
+                tex_coords,
+                ..Default::default()
+            };
+            vertices.push(vertex);
+        }
+        (vertices, indices)
+    };
+    // normalize_mesh(&mut vertices);
 
     let vertex_buffer = Buffer::from_data(
         &device,
         memory_properties,
         vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
         vk::BufferUsageFlags::STORAGE_BUFFER,
-        triangle,
+        vertices,
     )?;
 
     let index_buffer = Buffer::from_data(
@@ -604,6 +707,7 @@ fn main() -> anyhow::Result<()> {
         indices,
     )?;
 
+    let start_time = std::time::Instant::now();
     while !window.should_close() {
         let surface_capabilities =
             surface.get_physical_device_surface_capabilities_khr(physical_device)?;
@@ -615,7 +719,13 @@ fn main() -> anyhow::Result<()> {
                 device.device_wait_idle()?;
             }
             extent = surface_capabilities.current_extent;
-            swapchain = swapchain.recreate(surface.surface, render_pass, format, extent)?;
+            swapchain = swapchain.recreate(
+                surface.surface,
+                render_pass,
+                memory_properties,
+                format,
+                extent,
+            )?;
 
             unsafe {
                 device.destroy_semaphore(acquire_semaphore, None);
@@ -662,11 +772,19 @@ fn main() -> anyhow::Result<()> {
             //     &[to_transfer_barrier],
             // );
 
-            let clear_values = &[vk::ClearValue {
-                color: vk::ClearColorValue {
-                    float32: [0.2, 0.8, 0.9, 1.0],
+            let clear_values = &[
+                vk::ClearValue {
+                    color: vk::ClearColorValue {
+                        float32: [0.2, 0.8, 0.9, 1.0],
+                    },
                 },
-            }];
+                vk::ClearValue {
+                    depth_stencil: vk::ClearDepthStencilValue {
+                        depth: 1.0,
+                        stencil: 0,
+                    },
+                },
+            ];
             let render_pass_begin = vk::RenderPassBeginInfo::default()
                 .render_pass(render_pass)
                 .clear_values(clear_values)
@@ -728,6 +846,17 @@ fn main() -> anyhow::Result<()> {
                 index_buffer.buffer,
                 0,
                 vk::IndexType::UINT32,
+            );
+            let time = start_time.elapsed().as_secs_f32();
+            device.cmd_push_constants(
+                command_buffer,
+                pipeline_layout,
+                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, // same as above
+                0,
+                std::slice::from_raw_parts(
+                    &time as *const f32 as *const u8,
+                    std::mem::size_of::<f32>(),
+                ),
             );
             device.cmd_draw_indexed(command_buffer, index_buffer.data.len() as u32, 1, 0, 0, 0);
 

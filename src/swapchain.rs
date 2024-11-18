@@ -1,4 +1,11 @@
+use anyhow::Context;
 use ash::{khr, vk, Device, Instance};
+
+struct DepthResources {
+    image: vk::Image,
+    image_view: vk::ImageView,
+    memory: vk::DeviceMemory,
+}
 
 struct SwapchainResources {
     swapchain: vk::SwapchainKHR,
@@ -8,6 +15,7 @@ struct SwapchainResources {
 }
 pub struct Swapchain {
     handles: SwapchainResources,
+    depth_handles: DepthResources,
     pub format: vk::SurfaceFormatKHR,
     pub extent: vk::Extent2D,
 
@@ -23,14 +31,33 @@ impl Swapchain {
         device: &Device,
         surface: vk::SurfaceKHR,
         render_pass: vk::RenderPass,
+        memory_properties: vk::PhysicalDeviceMemoryProperties,
         format: vk::SurfaceFormatKHR,
         extent: vk::Extent2D,
     ) -> anyhow::Result<Self> {
         let loader = khr::swapchain::Device::new(instance, device);
-        let handles =
-            Self::create_swapchain(device, &loader, surface, render_pass, format, extent)?;
+        let depth_handles = Self::create_depth_resources(
+            device,
+            memory_properties,
+            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            vk::Extent3D {
+                width: extent.width,
+                height: extent.height,
+                depth: 1,
+            },
+        )?;
+        let handles = Self::create_swapchain(
+            device,
+            &loader,
+            surface,
+            render_pass,
+            depth_handles.image_view,
+            format,
+            extent,
+        )?;
         Ok(Self {
             handles,
+            depth_handles,
 
             format,
             extent,
@@ -46,21 +73,34 @@ impl Swapchain {
         self,
         surface: vk::SurfaceKHR,
         render_pass: vk::RenderPass,
+        memory_properties: vk::PhysicalDeviceMemoryProperties,
         format: vk::SurfaceFormatKHR,
         extent: vk::Extent2D,
     ) -> anyhow::Result<Self> {
         self.destroy();
 
+        let depth_handles = Self::create_depth_resources(
+            &self.device,
+            memory_properties,
+            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            vk::Extent3D {
+                width: extent.width,
+                height: extent.height,
+                depth: 1,
+            },
+        )?;
         let handles = Self::create_swapchain(
             &self.device,
             &self.loader,
             surface,
             render_pass,
+            depth_handles.image_view,
             format,
             extent,
         )?;
         Ok(Self {
             handles,
+            depth_handles,
 
             format,
             extent,
@@ -122,6 +162,10 @@ impl Swapchain {
                 self.device
                     .destroy_framebuffer(self.handles.framebuffers[ind], None);
             }
+            self.device.destroy_image(self.depth_handles.image, None);
+            self.device
+                .destroy_image_view(self.depth_handles.image_view, None);
+            self.device.free_memory(self.depth_handles.memory, None);
             self.loader.destroy_swapchain(self.handles.swapchain, None);
         }
     }
@@ -131,6 +175,7 @@ impl Swapchain {
         loader: &khr::swapchain::Device,
         surface: vk::SurfaceKHR,
         render_pass: vk::RenderPass,
+        depth_image_view: vk::ImageView,
         format: vk::SurfaceFormatKHR,
         extent: vk::Extent2D,
     ) -> anyhow::Result<SwapchainResources> {
@@ -156,10 +201,11 @@ impl Swapchain {
             let mut framebuffers = Vec::with_capacity(images.len());
             for (ind, image) in images.iter().enumerate() {
                 image_views.push(Self::create_image_view(device, *image, format.format)?);
+                let views = &[image_views[ind], depth_image_view];
                 framebuffers.push(Self::create_framebuffer(
                     device,
                     render_pass,
-                    image_views[ind],
+                    views,
                     extent.width,
                     extent.height,
                 )?);
@@ -199,20 +245,81 @@ impl Swapchain {
         Ok(unsafe { device.create_image_view(&create_info, None)? })
     }
 
+    fn create_depth_resources(
+        device: &Device,
+        memory_properties: vk::PhysicalDeviceMemoryProperties,
+        required_memory_flags: vk::MemoryPropertyFlags,
+        extent: vk::Extent3D,
+    ) -> anyhow::Result<DepthResources> {
+        let image_create_info = vk::ImageCreateInfo::default()
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(vk::Format::D32_SFLOAT)
+            .extent(extent)
+            .mip_levels(1)
+            .array_layers(1)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .usage(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+
+        let image = unsafe { device.create_image(&image_create_info, None)? };
+
+        // TODO: Cleanup
+        let mem_req = unsafe { device.get_image_memory_requirements(image) };
+        let mem_index = memory_properties
+            .memory_types
+            .iter()
+            .enumerate()
+            .position(|(ind, mem_type)| {
+                mem_type.property_flags.contains(required_memory_flags)
+                    && (mem_req.memory_type_bits & (1 << ind)) != 0
+            })
+            .context("failed to find a suitable memory type index")?;
+
+        let allocate_info = vk::MemoryAllocateInfo::default()
+            .allocation_size(mem_req.size)
+            .memory_type_index(mem_index as u32);
+        let memory = unsafe { device.allocate_memory(&allocate_info, None)? };
+        unsafe { device.bind_image_memory(image, memory, 0)? };
+
+        let image_view_create_info = vk::ImageViewCreateInfo::default()
+            .image(image)
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .format(vk::Format::D32_SFLOAT)
+            .components(vk::ComponentMapping {
+                r: vk::ComponentSwizzle::IDENTITY,
+                g: vk::ComponentSwizzle::IDENTITY,
+                b: vk::ComponentSwizzle::IDENTITY,
+                a: vk::ComponentSwizzle::IDENTITY,
+            })
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::DEPTH,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            });
+        let image_view = unsafe { device.create_image_view(&image_view_create_info, None)? };
+
+        Ok(DepthResources {
+            image,
+            memory,
+            image_view,
+        })
+    }
+
     fn create_framebuffer(
         device: &Device,
         render_pass: vk::RenderPass,
-        image_view: vk::ImageView,
+        image_views: &[vk::ImageView],
         width: u32,
         height: u32,
     ) -> anyhow::Result<vk::Framebuffer> {
-        let attachments = &[image_view];
         let create_info = vk::FramebufferCreateInfo::default()
             .render_pass(render_pass)
             .width(width)
             .height(height)
             .layers(1)
-            .attachments(attachments);
+            .attachments(image_views);
         Ok(unsafe { device.create_framebuffer(&create_info, None)? })
     }
 }

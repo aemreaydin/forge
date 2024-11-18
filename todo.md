@@ -2,6 +2,7 @@
 
 - [ ] Rust build.rs for shader building
 - [x] Resizing
+- [ ] Depth buffer
 - [ ] Descriptor set layout create flags doesn't have PUSH_DESCRIPTOR_BIT_KHR
 - [ ] Storage buffers research
 - [ ] Synchronization2 research
@@ -31,6 +32,7 @@
 - [ ] Run shader files inside rust macros that compile glsl during compile time
 - [ ] Mesh shaders
 - [ ] Validation of createinfos
+- [ ] Bounding box for models
 
 ! MoltenVK doesn't currently support VK_EXT_shader_object
 
