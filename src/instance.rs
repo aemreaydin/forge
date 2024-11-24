@@ -47,21 +47,26 @@ impl DebugUtils {
         _user_data: *mut std::os::raw::c_void,
     ) -> vk::Bool32 {
         let callback_data = *p_callback_data;
-        let message_id_name = if callback_data.p_message_id_name.is_null() {
-            std::borrow::Cow::from("")
-        } else {
-            CStr::from_ptr(callback_data.p_message_id_name).to_string_lossy()
-        };
+        // let message_id_name = if callback_data.p_message_id_name.is_null() {
+        //     std::borrow::Cow::from("")
+        // } else {
+        //     CStr::from_ptr(callback_data.p_message_id_name).to_string_lossy()
+        // };
         let message = if callback_data.p_message.is_null() {
             std::borrow::Cow::from("")
         } else {
             CStr::from_ptr(callback_data.p_message).to_string_lossy()
         };
 
-        let formatted_message = format!(
-            "\n[{:?}] [{}] ({}): {}\n",
-            message_type, message_id_name, callback_data.message_id_number, message
-        );
+        let message_type = match message_type {
+            vk::DebugUtilsMessageTypeFlagsEXT::GENERAL => "GEN",
+            vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE => "PERF",
+            vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION => "VAL",
+            vk::DebugUtilsMessageTypeFlagsEXT::DEVICE_ADDRESS_BINDING => "DAB",
+            _ => "UNK",
+        };
+
+        let formatted_message = format!("[{}]: {}", message_type, message.trim());
 
         match message_severity {
             s if s.contains(vk::DebugUtilsMessageSeverityFlagsEXT::ERROR) => {

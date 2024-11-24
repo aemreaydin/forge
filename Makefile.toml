@@ -15,14 +15,19 @@ dependencies = ["format"]
 [tasks.build_shaders]
 condition = { files_modified = { input = [
   "shaders/*.glsl",
+  "shaders/*.glsl",
 ], output = [
   "./target/debug/examples/shaders/*.spv",
-] }, files_not_exist = [
-  "shaders/*.spv",
-] }
+] } }
+script_runner = "@duckscript"
 script = '''
-find shaders \( -name "*.frag.glsl" -o -name "*.vert.glsl" \) -exec sh -c 'glslang -V "$1" -o "${1%.*}.spv"' > /dev/null sh {} \;
-cp shaders/*.spv target/debug/examples/shaders
+files = glob_array ./shaders/*.glsl
+for file in ${files}
+  basename = substring ${file} -5
+  spv_file = concat ${basename} .spv
+  exec --fail-on-error glslang -V "${file}" -o "${spv_file}"
+  glob_cp shaders/*.spv target/debug/examples/shaders/
+end
 '''
 
 [tasks.parallel_build]
@@ -35,5 +40,6 @@ dependencies = ["format"]
 
 [tasks.testbed]
 command = "cargo"
+env = { "RUST_LOG" = "info" }
 args = ["run", "--example", "testbed", "meshes/cube.obj"]
 dependencies = ["parallel_build"]
