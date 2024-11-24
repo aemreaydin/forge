@@ -4,7 +4,7 @@ use core::f32;
 use forge::{buffer::Buffer, surface::Surface};
 use glfw::{Action, Context as GlfwContext, Key};
 use nalgebra_glm::{Vec2, Vec3, Vec4};
-use std::{f32::consts::PI, path::Path};
+use std::path::Path;
 use tobj::LoadOptions;
 
 const VALIDATION_ENABLED: bool = cfg!(debug_assertions);
