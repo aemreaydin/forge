@@ -1,76 +1,36 @@
 use anyhow::{anyhow, Context};
-use ash::{ext, khr, mvk, vk, Device, Entry, Instance};
+use ash::{khr, mvk, vk};
 use core::f32;
-use forge::{buffer::Buffer, surface::Surface};
+use forge::{
+    buffer::{Buffer, Vertex},
+    instance::Instance,
+    surface::Surface,
+    swapchain::Swapchain,
+};
 use glfw::{Action, Context as GlfwContext, Key};
 use nalgebra_glm::{Vec2, Vec3, Vec4};
 use std::path::Path;
 use tobj::LoadOptions;
 
 const VALIDATION_ENABLED: bool = cfg!(debug_assertions);
-use forge::{buffer::Vertex, swapchain::Swapchain};
-const VALIDATION_LAYER: &std::ffi::CStr =
-    unsafe { std::ffi::CStr::from_bytes_with_nul_unchecked(b"VK_LAYER_KHRONOS_validation\0") };
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
-const REQUIRED_INSTANCE_EXTENSIONS: &[*const i8] = &[
-    vk::EXT_METAL_SURFACE_NAME.as_ptr(),
-    khr::portability_enumeration::NAME.as_ptr(),
-    khr::get_physical_device_properties2::NAME.as_ptr(),
-    mvk::macos_surface::NAME.as_ptr(),
+const REQUIRED_INSTANCE_EXTENSIONS: &[&std::ffi::CStr] = &[
+    vk::EXT_METAL_SURFACE_NAME,
+    khr::portability_enumeration::NAME,
+    khr::get_physical_device_properties2::NAME,
+    mvk::macos_surface::NAME,
 ];
 #[cfg(target_os = "linux")]
-const REQUIRED_INSTANCE_EXTENSIONS: &[*const i8] = &[khr::xlib_surface::NAME.as_ptr()];
+const REQUIRED_INSTANCE_EXTENSIONS: &[&std::ffi::CStr] = &[khr::xlib_surface::NAME];
 #[cfg(target_os = "windows")]
-const REQUIRED_INSTANCE_EXTENSIONS: &[*const i8] = &[khr::win32_surface::NAME.as_ptr()];
+const REQUIRED_INSTANCE_EXTENSIONS: &[&std::ffi::CStr] = &[khr::win32_surface::NAME];
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 const MACOS_REQUIRED_DEVICE_EXTENSIONS: &[*const i8] = &[
     khr::portability_subset::NAME.as_ptr(),
     // ext::shader_object::NAME.as_ptr(), TODO: Macos doesn't support this just yet
 ]; // TODO: Make this a setting in the application
-
-unsafe extern "system" fn vulkan_debug_callback(
-    message_severity: vk::DebugUtilsMessageSeverityFlagsEXT,
-    message_type: vk::DebugUtilsMessageTypeFlagsEXT,
-    p_callback_data: *const vk::DebugUtilsMessengerCallbackDataEXT<'_>,
-    _user_data: *mut std::os::raw::c_void,
-) -> vk::Bool32 {
-    let callback_data = *p_callback_data;
-    let message_id_name = if callback_data.p_message_id_name.is_null() {
-        std::borrow::Cow::from("")
-    } else {
-        std::ffi::CStr::from_ptr(callback_data.p_message_id_name).to_string_lossy()
-    };
-    let message = if callback_data.p_message.is_null() {
-        std::borrow::Cow::from("")
-    } else {
-        std::ffi::CStr::from_ptr(callback_data.p_message).to_string_lossy()
-    };
-
-    let formatted_message = format!(
-        "\n[{:?}] [{}] ({}): {}\n",
-        message_type, message_id_name, callback_data.message_id_number, message
-    );
-
-    match message_severity {
-        s if s.contains(vk::DebugUtilsMessageSeverityFlagsEXT::ERROR) => {
-            log::error!("{}", formatted_message);
-        }
-        s if s.contains(vk::DebugUtilsMessageSeverityFlagsEXT::WARNING) => {
-            log::warn!("{}", formatted_message);
-        }
-        s if s.contains(vk::DebugUtilsMessageSeverityFlagsEXT::INFO) => {
-            log::info!("{}", formatted_message);
-        }
-        s if s.contains(vk::DebugUtilsMessageSeverityFlagsEXT::VERBOSE) => {
-            log::debug!("{}", formatted_message);
-        }
-        _ => log::trace!("{}", formatted_message),
-    }
-
-    vk::FALSE
-}
 
 fn i8_array_to_string(slice: &[i8]) -> String {
     String::from_utf8_lossy(
@@ -81,99 +41,6 @@ fn i8_array_to_string(slice: &[i8]) -> String {
             .collect::<Vec<u8>>(),
     )
     .to_string()
-}
-
-fn create_instance(
-    entry: &Entry,
-    debug_info: &mut vk::DebugUtilsMessengerCreateInfoEXT,
-) -> anyhow::Result<Instance> {
-    let app_name = unsafe { std::ffi::CStr::from_bytes_with_nul_unchecked(b"forge\0") };
-    let layers = get_required_layers(entry)?;
-    let extensions = get_required_instance_extensions(entry)?;
-    let version = unsafe { entry.try_enumerate_instance_version()? }.unwrap_or(vk::API_VERSION_1_0);
-
-    let appinfo = vk::ApplicationInfo::default()
-        .application_name(app_name)
-        .application_version(0)
-        .engine_name(app_name)
-        .engine_version(0)
-        .api_version(version);
-
-    let create_flags = if cfg!(any(target_os = "macos", target_os = "ios")) {
-        vk::InstanceCreateFlags::ENUMERATE_PORTABILITY_KHR
-    } else {
-        vk::InstanceCreateFlags::default()
-    };
-
-    let mut create_info = vk::InstanceCreateInfo::default()
-        .application_info(&appinfo)
-        .enabled_layer_names(&layers)
-        .enabled_extension_names(&extensions)
-        .flags(create_flags);
-    if VALIDATION_ENABLED {
-        create_info = create_info.push_next(debug_info);
-    }
-
-    Ok(unsafe { entry.create_instance(&create_info, None)? })
-}
-
-fn create_debug_utils(
-    entry: &Entry,
-    instance: &Instance,
-    debug_info: vk::DebugUtilsMessengerCreateInfoEXT,
-) -> anyhow::Result<Option<(ext::debug_utils::Instance, vk::DebugUtilsMessengerEXT)>> {
-    if !VALIDATION_ENABLED {
-        return Ok(None);
-    }
-
-    let debug_utils_loader = ext::debug_utils::Instance::new(entry, instance);
-    let debug_call_back =
-        unsafe { debug_utils_loader.create_debug_utils_messenger(&debug_info, None)? };
-    Ok(Some((debug_utils_loader, debug_call_back)))
-}
-
-fn get_required_layers(entry: &Entry) -> anyhow::Result<Vec<*const i8>> {
-    let layer_names = unsafe {
-        entry
-            .enumerate_instance_layer_properties()?
-            .iter()
-            .map(|layer| std::ffi::CStr::from_ptr(layer.layer_name.as_ptr()))
-            .collect::<Vec<_>>()
-    };
-    let layers = {
-        if VALIDATION_ENABLED && layer_names.contains(&VALIDATION_LAYER) {
-            [VALIDATION_LAYER].iter().map(|l| l.as_ptr()).collect()
-        } else {
-            vec![]
-        }
-    };
-    Ok(layers)
-}
-
-fn get_required_instance_extensions(entry: &Entry) -> anyhow::Result<Vec<*const i8>> {
-    let mut required_extensions = vec![khr::surface::NAME.as_ptr()];
-    if VALIDATION_ENABLED {
-        required_extensions.push(vk::EXT_DEBUG_UTILS_NAME.as_ptr());
-        log::info!("Adding {:?}", vk::EXT_DEBUG_UTILS_NAME);
-    }
-    required_extensions.extend_from_slice(REQUIRED_INSTANCE_EXTENSIONS);
-    let system_extension_names = unsafe {
-        entry
-            .enumerate_instance_extension_properties(None)?
-            .iter()
-            .map(|extension| std::ffi::CStr::from_ptr(extension.extension_name.as_ptr()))
-            .collect::<Vec<_>>()
-    };
-    for required_extension in &required_extensions {
-        let extension_name = unsafe { std::ffi::CStr::from_ptr(*required_extension) };
-        if !system_extension_names.contains(&extension_name) {
-            return Err(anyhow!(
-                "extension {} not supported by the system",
-                extension_name.to_string_lossy()
-            ));
-        }
-    }
-    Ok(required_extensions)
 }
 
 fn get_required_device_extensions(
@@ -190,6 +57,7 @@ fn get_required_device_extensions(
 
     let device_extension_names = unsafe {
         instance
+            .instance
             .enumerate_device_extension_properties(*physical_device)?
             .iter()
             .map(|extension| std::ffi::CStr::from_ptr(extension.extension_name.as_ptr()))
@@ -211,15 +79,15 @@ fn create_physical_device(
     instance: &Instance,
     surface: &Surface,
 ) -> anyhow::Result<vk::PhysicalDevice> {
-    let physical_devices = unsafe { instance.enumerate_physical_devices()? };
+    let physical_devices = unsafe { instance.instance.enumerate_physical_devices()? };
 
     let mut selected_device: Option<vk::PhysicalDevice> = None;
     let mut fallback_device: Option<vk::PhysicalDevice> = None;
     for device in &physical_devices {
-        let props = unsafe { instance.get_physical_device_properties(*device) };
+        let props = unsafe { instance.instance.get_physical_device_properties(*device) };
         let surface_support = surface.get_physical_device_surface_support_khr(*device, 0)?; // TODO: Queue family index is hardcoded
                                                                                             // TODO: These are not being used right now
-        let _features = unsafe { instance.get_physical_device_features(*device) };
+        let _features = unsafe { instance.instance.get_physical_device_features(*device) };
         let is_discrete = props.device_type == vk::PhysicalDeviceType::DISCRETE_GPU;
 
         match surface_support {
@@ -233,7 +101,7 @@ fn create_physical_device(
 
     match (selected_device, fallback_device) {
         (Some(device), _) => {
-            let props = unsafe { instance.get_physical_device_properties(device) };
+            let props = unsafe { instance.instance.get_physical_device_properties(device) };
             log::info!(
                 "Using discrete gpu: {}",
                 i8_array_to_string(&props.device_name)
@@ -241,7 +109,7 @@ fn create_physical_device(
             Ok(device)
         }
         (_, Some(fallback)) => {
-            let props = unsafe { instance.get_physical_device_properties(fallback) };
+            let props = unsafe { instance.instance.get_physical_device_properties(fallback) };
             log::info!(
                 "Using fallback device: {}",
                 i8_array_to_string(&props.device_name)
@@ -255,7 +123,7 @@ fn create_physical_device(
 fn create_device(
     instance: &Instance,
     physical_device: &vk::PhysicalDevice,
-) -> anyhow::Result<Device> {
+) -> anyhow::Result<ash::Device> {
     let extensions = get_required_device_extensions(instance, physical_device)?;
     let queue_create_infos = [vk::DeviceQueueCreateInfo {
         queue_count: 1,
@@ -266,7 +134,11 @@ fn create_device(
     let create_info = vk::DeviceCreateInfo::default()
         .queue_create_infos(&queue_create_infos)
         .enabled_extension_names(&extensions);
-    Ok(unsafe { instance.create_device(*physical_device, &create_info, None)? })
+    Ok(unsafe {
+        instance
+            .instance
+            .create_device(*physical_device, &create_info, None)?
+    })
 }
 
 fn get_suitable_format(
@@ -285,7 +157,7 @@ fn get_suitable_format(
         .context("failed to find a suitable surface format")
 }
 
-fn create_command_pool(device: &Device) -> anyhow::Result<vk::CommandPool> {
+fn create_command_pool(device: &ash::Device) -> anyhow::Result<vk::CommandPool> {
     let create_info = vk::CommandPoolCreateInfo::default()
         .queue_family_index(0)
         .flags(vk::CommandPoolCreateFlags::TRANSIENT); // TODO: Queue family index hard coded
@@ -293,17 +165,17 @@ fn create_command_pool(device: &Device) -> anyhow::Result<vk::CommandPool> {
     Ok(unsafe { device.create_command_pool(&create_info, None)? })
 }
 
-fn create_semaphore(device: &Device) -> anyhow::Result<vk::Semaphore> {
+fn create_semaphore(device: &ash::Device) -> anyhow::Result<vk::Semaphore> {
     let create_info = vk::SemaphoreCreateInfo::default();
     Ok(unsafe { device.create_semaphore(&create_info, None)? })
 }
 
-fn create_fence(device: &Device) -> anyhow::Result<vk::Fence> {
+fn create_fence(device: &ash::Device) -> anyhow::Result<vk::Fence> {
     let create_info = vk::FenceCreateInfo::default();
     Ok(unsafe { device.create_fence(&create_info, None)? })
 }
 
-fn create_render_pass(device: &Device, format: vk::Format) -> anyhow::Result<vk::RenderPass> {
+fn create_render_pass(device: &ash::Device, format: vk::Format) -> anyhow::Result<vk::RenderPass> {
     let color_desc = vk::AttachmentDescription::default()
         .format(format)
         .samples(vk::SampleCountFlags::TYPE_1)
@@ -364,7 +236,7 @@ fn load_shader<P: AsRef<Path>>(path: P) -> anyhow::Result<Vec<u32>> {
 }
 
 fn create_shader_module<P: AsRef<Path>>(
-    device: &Device,
+    device: &ash::Device,
     path: P,
 ) -> anyhow::Result<vk::ShaderModule> {
     let shader_code = load_shader(path)?;
@@ -373,7 +245,7 @@ fn create_shader_module<P: AsRef<Path>>(
 }
 
 fn create_graphics_pipeline(
-    device: &Device,
+    device: &ash::Device,
     render_pass: vk::RenderPass,
     pipeline_layout: vk::PipelineLayout,
     vert_module: vk::ShaderModule,
@@ -468,7 +340,7 @@ fn create_graphics_pipeline(
 }
 
 fn create_pipeline_layout(
-    device: &Device,
+    device: &ash::Device,
 ) -> anyhow::Result<(vk::PipelineLayout, vk::DescriptorSetLayout)> {
     let push_constant_ranges = &[vk::PushConstantRange::default()
         .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
@@ -568,36 +440,23 @@ fn main() -> anyhow::Result<()> {
     window.set_key_polling(true);
     window.make_current();
 
-    let entry = unsafe { Entry::load()? };
+    let required_extensions = [
+        std::slice::from_ref(&khr::surface::NAME),
+        REQUIRED_INSTANCE_EXTENSIONS,
+    ]
+    .concat();
+    let instance = forge::instance::Instance::new(&required_extensions, VALIDATION_ENABLED)?;
 
-    let mut debug_info = if VALIDATION_ENABLED {
-        let debug_info = vk::DebugUtilsMessengerCreateInfoEXT::default()
-            .message_severity(
-                vk::DebugUtilsMessageSeverityFlagsEXT::ERROR
-                    | vk::DebugUtilsMessageSeverityFlagsEXT::WARNING
-                    | vk::DebugUtilsMessageSeverityFlagsEXT::INFO,
-            )
-            .message_type(
-                vk::DebugUtilsMessageTypeFlagsEXT::GENERAL
-                    | vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION
-                    | vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE,
-            )
-            .pfn_user_callback(Some(vulkan_debug_callback));
-        debug_info
-    } else {
-        vk::DebugUtilsMessengerCreateInfoEXT::default()
-    };
-
-    let instance = create_instance(&entry, &mut debug_info)?;
-    let debug_instance_fns = create_debug_utils(&entry, &instance, debug_info)?;
-
-    let surface = Surface::new(&entry, &instance, &window)?;
+    let surface = Surface::new(instance.clone(), &window)?;
     let physical_device = create_physical_device(&instance, &surface)?;
     let device = create_device(&instance, &physical_device)?;
-    let memory_properties =
-        unsafe { instance.get_physical_device_memory_properties(physical_device) };
+    let memory_properties = unsafe {
+        instance
+            .instance
+            .get_physical_device_memory_properties(physical_device)
+    };
 
-    let push_desc_loader = khr::push_descriptor::Device::new(&instance, &device);
+    let push_desc_loader = khr::push_descriptor::Device::new(&instance.instance, &device);
 
     let format = get_suitable_format(physical_device, &surface)?;
     let render_pass = create_render_pass(&device, format.format)?;
@@ -607,7 +466,7 @@ fn main() -> anyhow::Result<()> {
     let mut extent = surface_capabilities.current_extent;
 
     let mut swapchain = Swapchain::new(
-        &instance,
+        &instance.instance,
         &device,
         surface.surface,
         render_pass,
@@ -965,13 +824,9 @@ fn main() -> anyhow::Result<()> {
         device.destroy_render_pass(render_pass, None);
 
         device.destroy_device(None);
-
-        if let Some((debug_fns, debug_callback)) = debug_instance_fns {
-            debug_fns.destroy_debug_utils_messenger(debug_callback, None);
-        }
-        surface.destroy();
-        instance.destroy_instance(None);
     }
+    surface.destroy();
+    instance.destroy();
     Ok(())
 }
 
