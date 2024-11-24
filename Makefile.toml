@@ -1,0 +1,39 @@
+[tasks.format]
+install_crate = "rustfmt"
+command = "cargo"
+args = ["fmt", "--", "--emit=files"]
+
+[tasks.clean]
+command = "cargo"
+args = ["clean"]
+
+[tasks.build]
+command = "cargo"
+args = ["build"]
+dependencies = ["format"]
+
+[tasks.build_shaders]
+condition = { files_modified = { input = [
+  "shaders/*.glsl",
+], output = [
+  "./target/debug/examples/shaders/*.spv",
+] }, files_not_exist = [
+  "shaders/*.spv",
+] }
+script = '''
+find shaders \( -name "*.frag.glsl" -o -name "*.vert.glsl" \) -exec sh -c 'glslang -V "$1" -o "${1%.*}.spv"' > /dev/null sh {} \;
+cp shaders/*.spv target/debug/examples/shaders
+'''
+
+[tasks.parallel_build]
+run_task = { name = ["build", "build_shaders"], parallel = true }
+
+[tasks.test]
+command = "cargo"
+args = ["test"]
+dependencies = ["format"]
+
+[tasks.testbed]
+command = "cargo"
+args = ["run", "--example", "testbed", "meshes/cube.obj"]
+dependencies = ["parallel_build"]
