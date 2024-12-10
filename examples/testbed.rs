@@ -3,6 +3,7 @@ use ash::{khr, mvk, vk};
 use core::f32;
 use forge::{
     buffer::{Buffer, Vertex},
+    device::Device,
     instance::Instance,
     surface::Surface,
     swapchain::Swapchain,
@@ -14,24 +15,6 @@ use tobj::LoadOptions;
 
 const VALIDATION_ENABLED: bool = cfg!(debug_assertions);
 
-#[cfg(any(target_os = "macos", target_os = "ios"))]
-const REQUIRED_INSTANCE_EXTENSIONS: &[&std::ffi::CStr] = &[
-    vk::EXT_METAL_SURFACE_NAME,
-    khr::portability_enumeration::NAME,
-    khr::get_physical_device_properties2::NAME,
-    mvk::macos_surface::NAME,
-];
-#[cfg(target_os = "linux")]
-const REQUIRED_INSTANCE_EXTENSIONS: &[&std::ffi::CStr] = &[khr::xlib_surface::NAME];
-#[cfg(target_os = "windows")]
-const REQUIRED_INSTANCE_EXTENSIONS: &[&std::ffi::CStr] = &[khr::win32_surface::NAME];
-
-#[cfg(any(target_os = "macos", target_os = "ios"))]
-const MACOS_REQUIRED_DEVICE_EXTENSIONS: &[*const i8] = &[
-    khr::portability_subset::NAME.as_ptr(),
-    // ext::shader_object::NAME.as_ptr(), TODO: Macos doesn't support this just yet
-]; // TODO: Make this a setting in the application
-
 fn i8_array_to_string(slice: &[i8]) -> String {
     String::from_utf8_lossy(
         &slice
@@ -41,38 +24,6 @@ fn i8_array_to_string(slice: &[i8]) -> String {
             .collect::<Vec<u8>>(),
     )
     .to_string()
-}
-
-fn get_required_device_extensions(
-    instance: &Instance,
-    physical_device: &vk::PhysicalDevice,
-) -> anyhow::Result<Vec<*const i8>> {
-    #[allow(unused_mut)]
-    let mut required_extensions = vec![
-        vk::KHR_SWAPCHAIN_NAME.as_ptr(),
-        vk::KHR_PUSH_DESCRIPTOR_NAME.as_ptr(),
-    ];
-    #[cfg(any(target_os = "macos", target_os = "ios"))]
-    required_extensions.extend_from_slice(MACOS_REQUIRED_DEVICE_EXTENSIONS);
-
-    let device_extension_names = unsafe {
-        instance
-            .instance
-            .enumerate_device_extension_properties(*physical_device)?
-            .iter()
-            .map(|extension| std::ffi::CStr::from_ptr(extension.extension_name.as_ptr()))
-            .collect::<Vec<_>>()
-    };
-    for required_extension in &required_extensions {
-        let extension_name = unsafe { std::ffi::CStr::from_ptr(*required_extension) };
-        if !device_extension_names.contains(&extension_name) {
-            return Err(anyhow!(
-                "extension {} not supported by the device",
-                extension_name.to_string_lossy()
-            ));
-        }
-    }
-    Ok(required_extensions)
 }
 
 fn create_physical_device(
@@ -118,27 +69,6 @@ fn create_physical_device(
         }
         _ => Err(anyhow!("no suitable physical devices found")),
     }
-}
-
-fn create_device(
-    instance: &Instance,
-    physical_device: &vk::PhysicalDevice,
-) -> anyhow::Result<ash::Device> {
-    let extensions = get_required_device_extensions(instance, physical_device)?;
-    let queue_create_infos = [vk::DeviceQueueCreateInfo {
-        queue_count: 1,
-        queue_family_index: 0,
-        ..Default::default()
-    }
-    .queue_priorities(&[1.0])];
-    let create_info = vk::DeviceCreateInfo::default()
-        .queue_create_infos(&queue_create_infos)
-        .enabled_extension_names(&extensions);
-    Ok(unsafe {
-        instance
-            .instance
-            .create_device(*physical_device, &create_info, None)?
-    })
 }
 
 fn get_suitable_format(
@@ -251,7 +181,7 @@ fn create_graphics_pipeline(
     vert_module: vk::ShaderModule,
     frag_module: vk::ShaderModule,
 ) -> anyhow::Result<vk::Pipeline> {
-    let name = unsafe { std::ffi::CStr::from_bytes_with_nul_unchecked(b"main\0") };
+    let name = c"main";
     let stages = &[
         vk::PipelineShaderStageCreateInfo::default()
             .stage(vk::ShaderStageFlags::VERTEX)
@@ -440,26 +370,21 @@ fn main() -> anyhow::Result<()> {
     window.set_key_polling(true);
     window.make_current();
 
-    let required_extensions = [
-        std::slice::from_ref(&khr::surface::NAME),
-        REQUIRED_INSTANCE_EXTENSIONS,
-    ]
-    .concat();
-    let instance = forge::instance::Instance::new(&required_extensions, VALIDATION_ENABLED)?;
+    let instance = forge::instance::Instance::new(VALIDATION_ENABLED)?;
 
     let surface = Surface::new(instance.clone(), &window)?;
     let physical_device = create_physical_device(&instance, &surface)?;
-    let device = create_device(&instance, &physical_device)?;
+    let device = Device::new(&instance, &physical_device)?;
     let memory_properties = unsafe {
         instance
             .instance
             .get_physical_device_memory_properties(physical_device)
     };
 
-    let push_desc_loader = khr::push_descriptor::Device::new(&instance.instance, &device);
+    let push_desc_loader = khr::push_descriptor::Device::new(&instance.instance, &device.handle);
 
     let format = get_suitable_format(physical_device, &surface)?;
-    let render_pass = create_render_pass(&device, format.format)?;
+    let render_pass = create_render_pass(&device.handle, format.format)?;
 
     let surface_capabilities =
         surface.get_physical_device_surface_capabilities_khr(physical_device)?;
@@ -467,7 +392,7 @@ fn main() -> anyhow::Result<()> {
 
     let mut swapchain = Swapchain::new(
         &instance.instance,
-        &device,
+        &device.handle,
         surface.surface,
         render_pass,
         memory_properties,
@@ -475,30 +400,33 @@ fn main() -> anyhow::Result<()> {
         extent,
     )?;
 
-    let queue = unsafe { device.get_device_queue(0, 0) };
+    let queue = unsafe { device.handle.get_device_queue(0, 0) };
 
-    let (pipeline_layout, descriptor_set_layout) = create_pipeline_layout(&device)?;
+    let (pipeline_layout, descriptor_set_layout) = create_pipeline_layout(&device.handle)?;
 
-    let vert_module = create_shader_module(&device, "shaders/triangle.vert.spv")?;
-    let frag_module = create_shader_module(&device, "shaders/triangle.frag.spv")?;
+    let vert_module = create_shader_module(&device.handle, "shaders/triangle.vert.spv")?;
+    let frag_module = create_shader_module(&device.handle, "shaders/triangle.frag.spv")?;
     let graphics_pipeline = create_graphics_pipeline(
-        &device,
+        &device.handle,
         render_pass,
         pipeline_layout,
         vert_module,
         frag_module,
     )?;
 
-    let command_pool = create_command_pool(&device)?;
+    let command_pool = create_command_pool(&device.handle)?;
     let command_buffer_allocate_info = vk::CommandBufferAllocateInfo::default()
         .command_buffer_count(1)
         .command_pool(command_pool);
-    let command_buffers =
-        unsafe { device.allocate_command_buffers(&command_buffer_allocate_info)? };
+    let command_buffers = unsafe {
+        device
+            .handle
+            .allocate_command_buffers(&command_buffer_allocate_info)?
+    };
 
-    let mut acquire_semaphore = create_semaphore(&device)?;
-    let mut present_semaphore = create_semaphore(&device)?;
-    let fence = create_fence(&device)?;
+    let mut acquire_semaphore = create_semaphore(&device.handle)?;
+    let mut present_semaphore = create_semaphore(&device.handle)?;
+    let fence = create_fence(&device.handle)?;
 
     let (models, _materials) = tobj::load_obj(
         mesh_path,
@@ -552,7 +480,7 @@ fn main() -> anyhow::Result<()> {
     // normalize_mesh(&mut vertices);
 
     let vertex_buffer = Buffer::from_data(
-        &device,
+        &device.handle,
         memory_properties,
         vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
         vk::BufferUsageFlags::STORAGE_BUFFER,
@@ -560,7 +488,7 @@ fn main() -> anyhow::Result<()> {
     )?;
 
     let index_buffer = Buffer::from_data(
-        &device,
+        &device.handle,
         memory_properties,
         vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
         vk::BufferUsageFlags::INDEX_BUFFER,
@@ -576,7 +504,7 @@ fn main() -> anyhow::Result<()> {
             || surface_capabilities.current_extent.height != extent.height
         {
             unsafe {
-                device.device_wait_idle()?;
+                device.handle.device_wait_idle()?;
             }
             extent = surface_capabilities.current_extent;
             swapchain = swapchain.recreate(
@@ -588,23 +516,29 @@ fn main() -> anyhow::Result<()> {
             )?;
 
             unsafe {
-                device.destroy_semaphore(acquire_semaphore, None);
-                device.destroy_semaphore(present_semaphore, None);
+                device.handle.destroy_semaphore(acquire_semaphore, None);
+                device.handle.destroy_semaphore(present_semaphore, None);
 
-                acquire_semaphore = create_semaphore(&device)?;
-                present_semaphore = create_semaphore(&device)?;
+                acquire_semaphore = create_semaphore(&device.handle)?;
+                present_semaphore = create_semaphore(&device.handle)?;
             }
         }
 
         swapchain.acquire_next_image(acquire_semaphore, vk::Fence::null())?;
 
-        unsafe { device.reset_command_pool(command_pool, vk::CommandPoolResetFlags::empty())? }
+        unsafe {
+            device
+                .handle
+                .reset_command_pool(command_pool, vk::CommandPoolResetFlags::empty())?
+        }
 
         let command_buffer = command_buffers[0];
         let begin_info = vk::CommandBufferBeginInfo::default()
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
         unsafe {
-            device.begin_command_buffer(command_buffer, &begin_info)?;
+            device
+                .handle
+                .begin_command_buffer(command_buffer, &begin_info)?;
 
             // TODO: Command buffer
             // let to_transfer_barrier = vk::ImageMemoryBarrier::default()
@@ -661,23 +595,23 @@ fn main() -> anyhow::Result<()> {
                 .height(-(swapchain.extent.height as f32))
                 .min_depth(0.0)
                 .max_depth(1.0)];
-            device.cmd_set_viewport(command_buffer, 0, viewports);
+            device.handle.cmd_set_viewport(command_buffer, 0, viewports);
             let scissors = &[vk::Rect2D {
                 extent: swapchain.extent,
                 offset: vk::Offset2D { x: 0, y: 0 },
             }];
-            device.cmd_set_scissor(command_buffer, 0, scissors);
+            device.handle.cmd_set_scissor(command_buffer, 0, scissors);
             // render_pass: RenderPass::default(),
             // framebuffer: Framebuffer::default(),
             // render_area: Rect2D::default(),
             // clear_value_count: u32::default(),
             // p_clear_values: ::core::ptr::null(),
-            device.cmd_begin_render_pass(
+            device.handle.cmd_begin_render_pass(
                 command_buffer,
                 &render_pass_begin,
                 vk::SubpassContents::INLINE,
             );
-            device.cmd_bind_pipeline(
+            device.handle.cmd_bind_pipeline(
                 command_buffer,
                 vk::PipelineBindPoint::GRAPHICS,
                 graphics_pipeline,
@@ -701,7 +635,7 @@ fn main() -> anyhow::Result<()> {
                 descriptor_writes,
             );
 
-            device.cmd_bind_index_buffer(
+            device.handle.cmd_bind_index_buffer(
                 command_buffer,
                 index_buffer.buffer,
                 0,
@@ -727,7 +661,7 @@ fn main() -> anyhow::Result<()> {
                 &Vec3::new(0.0, 1.0, 0.0),
             );
             let mvp = projection * view * model;
-            device.cmd_push_constants(
+            device.handle.cmd_push_constants(
                 command_buffer,
                 pipeline_layout,
                 vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, // same as above
@@ -737,7 +671,14 @@ fn main() -> anyhow::Result<()> {
                     std::mem::size_of::<nalgebra_glm::Mat4>(),
                 ),
             );
-            device.cmd_draw_indexed(command_buffer, index_buffer.data.len() as u32, 1, 0, 0, 0);
+            device.handle.cmd_draw_indexed(
+                command_buffer,
+                index_buffer.data.len() as u32,
+                1,
+                0,
+                0,
+                0,
+            );
 
             // let subresource_range = vk::ImageSubresourceRange {
             //     aspect_mask: vk::ImageAspectFlags::COLOR,
@@ -766,8 +707,8 @@ fn main() -> anyhow::Result<()> {
             //     &[to_present_barrier],
             // );
 
-            device.cmd_end_render_pass(command_buffer);
-            device.end_command_buffer(command_buffer)?;
+            device.handle.cmd_end_render_pass(command_buffer);
+            device.handle.end_command_buffer(command_buffer)?;
 
             let cmds = &[command_buffer];
             let waits = &[acquire_semaphore];
@@ -779,7 +720,7 @@ fn main() -> anyhow::Result<()> {
                 .wait_semaphores(waits)
                 .signal_semaphores(presents)
                 .wait_dst_stage_mask(stage_flags);
-            device.queue_submit(queue, &[submit_info], fence)?;
+            device.handle.queue_submit(queue, &[submit_info], fence)?;
 
             let swapchains = &[swapchain.swapchain()];
             let present_info = vk::PresentInfoKHR::default()
@@ -790,8 +731,8 @@ fn main() -> anyhow::Result<()> {
             swapchain.queue_present(queue, &present_info)?;
 
             let fences = &[fence];
-            device.wait_for_fences(fences, true, u64::MAX)?;
-            device.reset_fences(fences)?;
+            device.handle.wait_for_fences(fences, true, u64::MAX)?;
+            device.handle.reset_fences(fences)?;
         };
 
         glfw.poll_events();
@@ -801,29 +742,33 @@ fn main() -> anyhow::Result<()> {
     }
 
     unsafe {
-        device.device_wait_idle()?;
+        device.handle.device_wait_idle()?;
 
-        device.free_memory(vertex_buffer.memory, None);
-        device.destroy_buffer(vertex_buffer.buffer, None);
+        device.handle.free_memory(vertex_buffer.memory, None);
+        device.handle.destroy_buffer(vertex_buffer.buffer, None);
 
-        device.free_memory(index_buffer.memory, None);
-        device.destroy_buffer(index_buffer.buffer, None);
+        device.handle.free_memory(index_buffer.memory, None);
+        device.handle.destroy_buffer(index_buffer.buffer, None);
 
-        device.destroy_fence(fence, None);
-        device.destroy_semaphore(acquire_semaphore, None);
-        device.destroy_semaphore(present_semaphore, None);
+        device.handle.destroy_fence(fence, None);
+        device.handle.destroy_semaphore(acquire_semaphore, None);
+        device.handle.destroy_semaphore(present_semaphore, None);
 
-        device.free_command_buffers(command_pool, &command_buffers);
-        device.destroy_command_pool(command_pool, None);
+        device
+            .handle
+            .free_command_buffers(command_pool, &command_buffers);
+        device.handle.destroy_command_pool(command_pool, None);
 
-        device.destroy_pipeline(graphics_pipeline, None);
-        device.destroy_descriptor_set_layout(descriptor_set_layout, None);
-        device.destroy_pipeline_layout(pipeline_layout, None);
+        device.handle.destroy_pipeline(graphics_pipeline, None);
+        device
+            .handle
+            .destroy_descriptor_set_layout(descriptor_set_layout, None);
+        device.handle.destroy_pipeline_layout(pipeline_layout, None);
 
         swapchain.destroy();
-        device.destroy_render_pass(render_pass, None);
+        device.handle.destroy_render_pass(render_pass, None);
 
-        device.destroy_device(None);
+        device.handle.destroy_device(None);
     }
     surface.destroy();
     instance.destroy();

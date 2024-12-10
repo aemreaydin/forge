@@ -1,9 +1,20 @@
 use anyhow::anyhow;
-use ash::{ext, vk, Entry};
+use ash::{ext, khr, vk, Entry};
 use std::{ffi::CStr, sync::Arc};
 
-const VALIDATION_LAYER: &CStr =
-    unsafe { CStr::from_bytes_with_nul_unchecked(b"VK_LAYER_KHRONOS_validation\0") };
+const VALIDATION_LAYER: &CStr = c"VK_LAYER_KHRONOS_validation";
+
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+const REQUIRED_INSTANCE_EXTENSIONS: &[&std::ffi::CStr] = &[
+    vk::EXT_METAL_SURFACE_NAME,
+    khr::portability_enumeration::NAME,
+    khr::get_physical_device_properties2::NAME,
+    mvk::macos_surface::NAME,
+];
+#[cfg(target_os = "linux")]
+const REQUIRED_INSTANCE_EXTENSIONS: &[&std::ffi::CStr] = &[khr::xlib_surface::NAME];
+#[cfg(target_os = "windows")]
+const REQUIRED_INSTANCE_EXTENSIONS: &[&std::ffi::CStr] = &[khr::win32_surface::NAME];
 
 pub struct DebugUtils {
     debug_utils_messenger: vk::DebugUtilsMessengerEXT,
@@ -96,20 +107,20 @@ pub struct Instance {
 }
 
 impl Instance {
-    pub fn new(
-        required_extensions: &[&CStr],
-        enable_validation: bool,
-    ) -> anyhow::Result<Arc<Self>> {
+    pub fn new(enable_validation: bool) -> anyhow::Result<Arc<Self>> {
         let entry = unsafe { Entry::load()? };
-        let app_name = unsafe { CStr::from_bytes_with_nul_unchecked(b"forge\0") };
+        let app_name = c"forge";
         let layers = if enable_validation {
             Self::validate_required_layers(&entry)?
         } else {
             vec![]
         };
+
+        let mut required_extensions = vec![khr::surface::NAME];
+        required_extensions.extend(REQUIRED_INSTANCE_EXTENSIONS);
         let extensions = Self::validate_required_instance_extensions(
             &entry,
-            required_extensions,
+            &required_extensions,
             enable_validation,
         )?;
         let version =

@@ -2,6 +2,7 @@
 
 - [ ] Rust build.rs for shader building
 - [x] Resizing
+- [ ] Move cmd calls to device with custom builder
 - [ ] Depth buffer
 - [ ] Descriptor set layout create flags doesn't have PUSH_DESCRIPTOR_BIT_KHR
 - [ ] Storage buffers research
