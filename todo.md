@@ -1,5 +1,6 @@
 # Forge Checklist
 
+- [ ] Use OnceLock for device and instance fns
 - [ ] Rust build.rs for shader building
 - [x] Resizing
 - [ ] Move cmd calls to device with custom builder
@@ -16,7 +17,9 @@
 - [ ] Timeline
       semaphores - [Vulkan Samples](https://github.com/KhronosGroup/Vulkan-Samples/tree/main/samples/extensions/timeline_semaphore)
 - [ ] Most places have queue family index hard-coded
+- [ ] Learn about color blending and use cases
 - [ ] Create own surface without using any libraries (will need to write platform code)
+- [ ] Add hot-reloading shader functionality
 - [ ] Create proper queues for each queue family (compute, transfer, graphics)
 - [ ] Check for Vulkan Instance version when running the application
 - [ ] Add better check for physical device selection

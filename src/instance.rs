@@ -3,6 +3,7 @@ use ash::{ext, khr, vk, Entry};
 use std::{ffi::CStr, sync::Arc};
 
 const VALIDATION_LAYER: &CStr = c"VK_LAYER_KHRONOS_validation";
+const OPTIONAL_INSTANCE_LAYERS: &[&std::ffi::CStr] = &[c"VK_LAYER_KHRONOS_shader_object"];
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 const REQUIRED_INSTANCE_EXTENSIONS: &[&std::ffi::CStr] = &[
@@ -110,11 +111,14 @@ impl Instance {
     pub fn new(enable_validation: bool) -> anyhow::Result<Arc<Self>> {
         let entry = unsafe { Entry::load()? };
         let app_name = c"forge";
-        let layers = if enable_validation {
-            Self::validate_required_layers(&entry)?
+
+        let layer_properties = unsafe { entry.enumerate_instance_layer_properties()? };
+        let mut layers = if enable_validation {
+            Self::validate_required_layers(&layer_properties)
         } else {
             vec![]
         };
+        layers.extend(Self::validate_optional_layers(&layer_properties));
 
         let mut required_extensions = vec![khr::surface::NAME];
         required_extensions.extend(REQUIRED_INSTANCE_EXTENSIONS);
@@ -166,10 +170,9 @@ impl Instance {
         }
     }
 
-    fn validate_required_layers(entry: &Entry) -> anyhow::Result<Vec<*const i8>> {
+    fn validate_required_layers(layer_properties: &[vk::LayerProperties]) -> Vec<*const i8> {
         let layer_names = unsafe {
-            entry
-                .enumerate_instance_layer_properties()?
+            layer_properties
                 .iter()
                 .map(|layer| CStr::from_ptr(layer.layer_name.as_ptr()))
                 .collect::<Vec<_>>()
@@ -181,7 +184,29 @@ impl Instance {
                 vec![]
             }
         };
-        Ok(layers)
+        layers
+    }
+
+    fn validate_optional_layers(layer_properties: &[vk::LayerProperties]) -> Vec<*const i8> {
+        let layer_names = unsafe {
+            layer_properties
+                .iter()
+                .map(|layer| CStr::from_ptr(layer.layer_name.as_ptr()))
+                .collect::<Vec<_>>()
+        };
+        let layers = {
+            OPTIONAL_INSTANCE_LAYERS
+                .iter()
+                .filter_map(|layer| {
+                    if layer_names.contains(layer) {
+                        Some(layer.as_ptr())
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+        layers
     }
 
     fn validate_required_instance_extensions(

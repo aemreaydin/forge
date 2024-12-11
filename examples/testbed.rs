@@ -1,10 +1,13 @@
 use anyhow::{anyhow, Context};
+#[allow(unused_imports)]
 use ash::{khr, mvk, vk};
 use core::f32;
+use either::Either;
 use forge::{
     buffer::{Buffer, Vertex},
     device::Device,
     instance::Instance,
+    shader_object::Shader,
     surface::Surface,
     swapchain::Swapchain,
 };
@@ -160,9 +163,9 @@ fn create_render_pass(device: &ash::Device, format: vk::Format) -> anyhow::Resul
     Ok(unsafe { device.create_render_pass(&create_info, None)? })
 }
 
-fn load_shader<P: AsRef<Path>>(path: P) -> anyhow::Result<Vec<u32>> {
+fn load_shader<P: AsRef<Path>, T: bytemuck::Pod>(path: P) -> anyhow::Result<Vec<T>> {
     let bytes = std::fs::read(path)?;
-    Ok(bytemuck::try_cast_slice::<u8, u32>(&bytes)?.to_vec())
+    Ok(bytemuck::try_cast_slice::<u8, T>(&bytes)?.to_vec())
 }
 
 fn create_shader_module<P: AsRef<Path>>(
@@ -356,7 +359,7 @@ fn main() -> anyhow::Result<()> {
     let mesh_path = std::env::args()
         .nth(1)
         .context("Failed to get a mesh path from args")?;
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("trace"))
         .format_target(false)
         .format_indent(None)
         .format_timestamp_nanos()
@@ -404,15 +407,45 @@ fn main() -> anyhow::Result<()> {
 
     let (pipeline_layout, descriptor_set_layout) = create_pipeline_layout(&device.handle)?;
 
-    let vert_module = create_shader_module(&device.handle, "shaders/triangle.vert.spv")?;
-    let frag_module = create_shader_module(&device.handle, "shaders/triangle.frag.spv")?;
-    let graphics_pipeline = create_graphics_pipeline(
-        &device.handle,
-        render_pass,
-        pipeline_layout,
-        vert_module,
-        frag_module,
-    )?;
+    let either_pipeline_or_objects = match device.device_support.shader_ext {
+        true => {
+            let push_constant_ranges = &[vk::PushConstantRange::default()
+                .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
+                .offset(0)
+                .size(size_of::<nalgebra_glm::Mat4>() as u32)];
+            let vert_shader = forge::shader_object::Shader::new(
+                &instance.instance,
+                &device.handle,
+                c"main",
+                vk::ShaderStageFlags::VERTEX,
+                &load_shader::<_, u8>("shaders/triangle.vert.spv")?,
+                &[descriptor_set_layout],
+                push_constant_ranges,
+            )?;
+            let frag_shader = forge::shader_object::Shader::new(
+                &instance.instance,
+                &device.handle,
+                c"main",
+                vk::ShaderStageFlags::FRAGMENT,
+                &load_shader::<_, u8>("shaders/triangle.frag.spv")?,
+                &[descriptor_set_layout],
+                push_constant_ranges,
+            )?;
+
+            Either::Left((vert_shader, frag_shader))
+        }
+        false => {
+            let vert_module = create_shader_module(&device.handle, "shaders/triangle.vert.spv")?;
+            let frag_module = create_shader_module(&device.handle, "shaders/triangle.frag.spv")?;
+            Either::Right(create_graphics_pipeline(
+                &device.handle,
+                render_pass,
+                pipeline_layout,
+                vert_module,
+                frag_module,
+            )?)
+        }
+    };
 
     let command_pool = create_command_pool(&device.handle)?;
     let command_buffer_allocate_info = vk::CommandBufferAllocateInfo::default()
@@ -540,31 +573,30 @@ fn main() -> anyhow::Result<()> {
                 .handle
                 .begin_command_buffer(command_buffer, &begin_info)?;
 
-            // TODO: Command buffer
-            // let to_transfer_barrier = vk::ImageMemoryBarrier::default()
-            //     .src_access_mask(vk::AccessFlags::empty())
-            //     .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-            //     .old_layout(vk::ImageLayout::UNDEFINED)
-            //     .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-            //     .image(images[image_index as usize])
-            //     .subresource_range(vk::ImageSubresourceRange {
-            //         aspect_mask: vk::ImageAspectFlags::COLOR,
-            //         base_mip_level: 0,
-            //         level_count: 1,
-            //         base_array_layer: 0,
-            //         layer_count: 1,
-            // })
-            //     .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-            //     .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED);
-            // device.cmd_pipeline_barrier(
-            //     command_buffer,
-            //     vk::PipelineStageFlags::TOP_OF_PIPE,
-            //     vk::PipelineStageFlags::TRANSFER,
-            //     vk::DependencyFlags::empty(),
-            //     &[],
-            //     &[],
-            //     &[to_transfer_barrier],
-            // );
+            let to_transfer_barrier = vk::ImageMemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::empty())
+                .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_READ)
+                .old_layout(vk::ImageLayout::UNDEFINED)
+                .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .image(swapchain.image())
+                .subresource_range(vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                })
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED);
+            device.handle.cmd_pipeline_barrier(
+                command_buffer,
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[to_transfer_barrier],
+            );
 
             let clear_values = &[
                 vk::ClearValue {
@@ -579,14 +611,6 @@ fn main() -> anyhow::Result<()> {
                     },
                 },
             ];
-            let render_pass_begin = vk::RenderPassBeginInfo::default()
-                .render_pass(render_pass)
-                .clear_values(clear_values)
-                .framebuffer(swapchain.framebuffer())
-                .render_area(vk::Rect2D {
-                    extent: swapchain.extent,
-                    offset: vk::Offset2D { x: 0, y: 0 },
-                });
 
             let viewports = &[vk::Viewport::default()
                 .x(0.0)
@@ -601,21 +625,6 @@ fn main() -> anyhow::Result<()> {
                 offset: vk::Offset2D { x: 0, y: 0 },
             }];
             device.handle.cmd_set_scissor(command_buffer, 0, scissors);
-            // render_pass: RenderPass::default(),
-            // framebuffer: Framebuffer::default(),
-            // render_area: Rect2D::default(),
-            // clear_value_count: u32::default(),
-            // p_clear_values: ::core::ptr::null(),
-            device.handle.cmd_begin_render_pass(
-                command_buffer,
-                &render_pass_begin,
-                vk::SubpassContents::INLINE,
-            );
-            device.handle.cmd_bind_pipeline(
-                command_buffer,
-                vk::PipelineBindPoint::GRAPHICS,
-                graphics_pipeline,
-            );
 
             let buffer_info = &[vk::DescriptorBufferInfo::default()
                 .buffer(vertex_buffer.buffer)
@@ -626,21 +635,6 @@ fn main() -> anyhow::Result<()> {
                 .dst_binding(0)
                 .buffer_info(buffer_info)
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)];
-
-            push_desc_loader.cmd_push_descriptor_set(
-                command_buffer,
-                vk::PipelineBindPoint::GRAPHICS,
-                pipeline_layout,
-                0,
-                descriptor_writes,
-            );
-
-            device.handle.cmd_bind_index_buffer(
-                command_buffer,
-                index_buffer.buffer,
-                0,
-                vk::IndexType::UINT32,
-            );
 
             let time = start_time.elapsed().as_secs_f32();
             let model = nalgebra_glm::rotate(
@@ -661,53 +655,150 @@ fn main() -> anyhow::Result<()> {
                 &Vec3::new(0.0, 1.0, 0.0),
             );
             let mvp = projection * view * model;
-            device.handle.cmd_push_constants(
+            match &either_pipeline_or_objects {
+                Either::Left((vert_shader, frag_shader)) => {
+                    let color_attachments = &[vk::RenderingAttachmentInfo::default()
+                        .image_view(swapchain.image_view())
+                        .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                        .load_op(vk::AttachmentLoadOp::CLEAR)
+                        .store_op(vk::AttachmentStoreOp::STORE)
+                        .clear_value(clear_values[0])];
+                    let rendering_info = vk::RenderingInfo::default()
+                        .render_area(vk::Rect2D {
+                            offset: vk::Offset2D { x: 0, y: 0 },
+                            extent,
+                        })
+                        .layer_count(1)
+                        .color_attachments(color_attachments);
+                    // render_area: Rect2D::default(),
+                    // layer_count: u32::default(),
+                    // view_mask: u32::default(),
+                    // color_attachment_count: u32::default(),
+                    // p_color_attachments: ::core::ptr::null(),
+                    // p_depth_attachment: ::core::ptr::null(),
+                    // p_stencil_attachment: ::core::ptr::null(),
+                    device
+                        .handle
+                        .cmd_begin_rendering(command_buffer, &rendering_info);
+                    vert_shader.bind_shader(command_buffer, &[vk::ShaderStageFlags::VERTEX]);
+                    frag_shader.bind_shader(command_buffer, &[vk::ShaderStageFlags::FRAGMENT]);
+                    Shader::set_vertex_input(command_buffer, &[], &[]);
+                    Shader::set_dynamic_state(&device.handle, command_buffer, viewports, scissors);
+                    push_desc_loader.cmd_push_descriptor_set(
+                        command_buffer,
+                        vk::PipelineBindPoint::GRAPHICS,
+                        pipeline_layout,
+                        0,
+                        descriptor_writes,
+                    );
+                    device.handle.cmd_bind_index_buffer(
+                        command_buffer,
+                        index_buffer.buffer,
+                        0,
+                        vk::IndexType::UINT32,
+                    );
+                    device.handle.cmd_push_constants(
+                        command_buffer,
+                        pipeline_layout,
+                        vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, // same as above
+                        0,
+                        std::slice::from_raw_parts(
+                            mvp.as_ptr() as *const u8,
+                            std::mem::size_of::<nalgebra_glm::Mat4>(),
+                        ),
+                    );
+                    device.handle.cmd_draw_indexed(
+                        command_buffer,
+                        index_buffer.data.len() as u32,
+                        1,
+                        0,
+                        0,
+                        0,
+                    );
+                    device.handle.cmd_end_rendering(command_buffer);
+                }
+                Either::Right(graphics_pipeline) => {
+                    let render_pass_begin = vk::RenderPassBeginInfo::default()
+                        .render_pass(render_pass)
+                        .clear_values(clear_values)
+                        .framebuffer(swapchain.framebuffer())
+                        .render_area(vk::Rect2D {
+                            extent: swapchain.extent,
+                            offset: vk::Offset2D { x: 0, y: 0 },
+                        });
+                    device.handle.cmd_begin_render_pass(
+                        command_buffer,
+                        &render_pass_begin,
+                        vk::SubpassContents::INLINE,
+                    );
+                    push_desc_loader.cmd_push_descriptor_set(
+                        command_buffer,
+                        vk::PipelineBindPoint::GRAPHICS,
+                        pipeline_layout,
+                        0,
+                        descriptor_writes,
+                    );
+
+                    device.handle.cmd_bind_index_buffer(
+                        command_buffer,
+                        index_buffer.buffer,
+                        0,
+                        vk::IndexType::UINT32,
+                    );
+                    device.handle.cmd_push_constants(
+                        command_buffer,
+                        pipeline_layout,
+                        vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, // same as above
+                        0,
+                        std::slice::from_raw_parts(
+                            mvp.as_ptr() as *const u8,
+                            std::mem::size_of::<nalgebra_glm::Mat4>(),
+                        ),
+                    );
+                    device.handle.cmd_bind_pipeline(
+                        command_buffer,
+                        vk::PipelineBindPoint::GRAPHICS,
+                        *graphics_pipeline,
+                    );
+                    device.handle.cmd_draw_indexed(
+                        command_buffer,
+                        index_buffer.data.len() as u32,
+                        1,
+                        0,
+                        0,
+                        0,
+                    );
+                    device.handle.cmd_end_render_pass(command_buffer);
+                }
+            }
+
+            let subresource_range = vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            };
+            let to_present_barrier = vk::ImageMemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_READ)
+                .dst_access_mask(vk::AccessFlags::empty())
+                .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .new_layout(vk::ImageLayout::PRESENT_SRC_KHR) // For presenting
+                .image(swapchain.image())
+                .subresource_range(subresource_range)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED);
+
+            device.handle.cmd_pipeline_barrier(
                 command_buffer,
-                pipeline_layout,
-                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, // same as above
-                0,
-                std::slice::from_raw_parts(
-                    mvp.as_ptr() as *const u8,
-                    std::mem::size_of::<nalgebra_glm::Mat4>(),
-                ),
-            );
-            device.handle.cmd_draw_indexed(
-                command_buffer,
-                index_buffer.data.len() as u32,
-                1,
-                0,
-                0,
-                0,
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[to_present_barrier],
             );
 
-            // let subresource_range = vk::ImageSubresourceRange {
-            //     aspect_mask: vk::ImageAspectFlags::COLOR,
-            //     base_mip_level: 0,
-            //     level_count: 1,
-            //     base_array_layer: 0,
-            //     layer_count: 1,
-            // };
-            // let to_present_barrier = vk::ImageMemoryBarrier::default()
-            //     .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-            //     .dst_access_mask(vk::AccessFlags::empty())
-            //     .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-            //     .new_layout(vk::ImageLayout::PRESENT_SRC_KHR) // For presenting
-            //     .image(images[image_index as usize])
-            //     .subresource_range(subresource_range)
-            //     .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-            //     .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED);
-
-            // device.cmd_pipeline_barrier(
-            //     command_buffer,
-            //     vk::PipelineStageFlags::TRANSFER,
-            //     vk::PipelineStageFlags::BOTTOM_OF_PIPE,
-            //     vk::DependencyFlags::empty(),
-            //     &[],
-            //     &[],
-            //     &[to_present_barrier],
-            // );
-
-            device.handle.cmd_end_render_pass(command_buffer);
             device.handle.end_command_buffer(command_buffer)?;
 
             let cmds = &[command_buffer];
@@ -759,7 +850,15 @@ fn main() -> anyhow::Result<()> {
             .free_command_buffers(command_pool, &command_buffers);
         device.handle.destroy_command_pool(command_pool, None);
 
-        device.handle.destroy_pipeline(graphics_pipeline, None);
+        match either_pipeline_or_objects {
+            Either::Left((vert_shader, frag_shader)) => {
+                vert_shader.destroy();
+                frag_shader.destroy();
+            }
+            Either::Right(graphics_pipeline) => {
+                device.handle.destroy_pipeline(graphics_pipeline, None);
+            }
+        }
         device
             .handle
             .destroy_descriptor_set_layout(descriptor_set_layout, None);

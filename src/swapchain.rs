@@ -154,6 +154,10 @@ impl Swapchain {
         self.handles.images[self.current_image_index as usize]
     }
 
+    pub fn image_view(&self) -> vk::ImageView {
+        self.handles.image_views[self.current_image_index as usize]
+    }
+
     pub fn destroy(&self) {
         unsafe {
             for ind in 0..self.handles.images.len() {
