@@ -409,6 +409,7 @@ fn main() -> anyhow::Result<()> {
 
     let either_pipeline_or_objects = match device.device_support.shader_ext {
         true => {
+            log::info!("Using Shader Object");
             let push_constant_ranges = &[vk::PushConstantRange::default()
                 .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
                 .offset(0)
@@ -435,6 +436,7 @@ fn main() -> anyhow::Result<()> {
             Either::Left((vert_shader, frag_shader))
         }
         false => {
+            log::info!("Using Graphics Pipeline");
             let vert_module = create_shader_module(&device.handle, "shaders/triangle.vert.spv")?;
             let frag_module = create_shader_module(&device.handle, "shaders/triangle.frag.spv")?;
             Either::Right(create_graphics_pipeline(
