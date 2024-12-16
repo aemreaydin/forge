@@ -665,20 +665,20 @@ fn main() -> anyhow::Result<()> {
                         .load_op(vk::AttachmentLoadOp::CLEAR)
                         .store_op(vk::AttachmentStoreOp::STORE)
                         .clear_value(clear_values[0])];
+                    let depth_attachment = vk::RenderingAttachmentInfo::default()
+                        .image_view(swapchain.depth_image_view())
+                        .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                        .load_op(vk::AttachmentLoadOp::CLEAR)
+                        .store_op(vk::AttachmentStoreOp::STORE)
+                        .clear_value(clear_values[1]);
                     let rendering_info = vk::RenderingInfo::default()
                         .render_area(vk::Rect2D {
                             offset: vk::Offset2D { x: 0, y: 0 },
                             extent,
                         })
                         .layer_count(1)
-                        .color_attachments(color_attachments);
-                    // render_area: Rect2D::default(),
-                    // layer_count: u32::default(),
-                    // view_mask: u32::default(),
-                    // color_attachment_count: u32::default(),
-                    // p_color_attachments: ::core::ptr::null(),
-                    // p_depth_attachment: ::core::ptr::null(),
-                    // p_stencil_attachment: ::core::ptr::null(),
+                        .color_attachments(color_attachments)
+                        .depth_attachment(&depth_attachment);
                     device
                         .handle
                         .cmd_begin_rendering(command_buffer, &rendering_info);
