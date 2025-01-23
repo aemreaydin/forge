@@ -1,12 +1,11 @@
 use anyhow::{anyhow, Context};
-#[allow(unused_imports)]
-use ash::{khr, mvk, vk};
+use ash::{khr, vk};
 use core::f32;
 use either::Either;
 use forge::{
     buffer::{Buffer, Vertex},
     device::Device,
-    instance::Instance,
+    physical_device::PhysicalDevice,
     shader_object::Shader,
     surface::Surface,
     swapchain::Swapchain,
@@ -18,62 +17,6 @@ use tobj::LoadOptions;
 
 const VALIDATION_ENABLED: bool = cfg!(debug_assertions);
 
-fn i8_array_to_string(slice: &[i8]) -> String {
-    String::from_utf8_lossy(
-        &slice
-            .iter()
-            .take_while(|&&c| c != 0) // Stop at null terminator
-            .map(|&c| c as u8)
-            .collect::<Vec<u8>>(),
-    )
-    .to_string()
-}
-
-fn create_physical_device(
-    instance: &Instance,
-    surface: &Surface,
-) -> anyhow::Result<vk::PhysicalDevice> {
-    let physical_devices = unsafe { instance.instance.enumerate_physical_devices()? };
-
-    let mut selected_device: Option<vk::PhysicalDevice> = None;
-    let mut fallback_device: Option<vk::PhysicalDevice> = None;
-    for device in &physical_devices {
-        let props = unsafe { instance.instance.get_physical_device_properties(*device) };
-        let surface_support = surface.get_physical_device_surface_support_khr(*device, 0)?; // TODO: Queue family index is hardcoded
-                                                                                            // TODO: These are not being used right now
-        let _features = unsafe { instance.instance.get_physical_device_features(*device) };
-        let is_discrete = props.device_type == vk::PhysicalDeviceType::DISCRETE_GPU;
-
-        match surface_support {
-            true if is_discrete => {
-                selected_device = Some(*device);
-            }
-            true => fallback_device = Some(*device),
-            false => {}
-        }
-    }
-
-    match (selected_device, fallback_device) {
-        (Some(device), _) => {
-            let props = unsafe { instance.instance.get_physical_device_properties(device) };
-            log::info!(
-                "Using discrete gpu: {}",
-                i8_array_to_string(&props.device_name)
-            );
-            Ok(device)
-        }
-        (_, Some(fallback)) => {
-            let props = unsafe { instance.instance.get_physical_device_properties(fallback) };
-            log::info!(
-                "Using fallback device: {}",
-                i8_array_to_string(&props.device_name)
-            );
-            Ok(fallback)
-        }
-        _ => Err(anyhow!("no suitable physical devices found")),
-    }
-}
-
 fn get_suitable_format(
     physical_device: vk::PhysicalDevice,
     surface: &Surface,
@@ -82,7 +25,6 @@ fn get_suitable_format(
     surface_formats
         .into_iter()
         .find(|format| {
-            // TODO: Not the best way to do it
             !(format.color_space != vk::ColorSpaceKHR::SRGB_NONLINEAR
                 || format.format != vk::Format::R8G8B8A8_SRGB
                     && format.format != vk::Format::B8G8R8A8_SRGB)
@@ -246,10 +188,6 @@ fn create_graphics_pipeline(
         .layout(pipeline_layout)
         .subpass(0);
 
-    // pub layout: PipelineLayout,
-    // pub render_pass: RenderPass,
-    // pub subpass: u32,
-
     // TODO: Add pipelinecache
     unsafe {
         let pipeline_res =
@@ -296,37 +234,7 @@ fn create_pipeline_layout(
 
     Ok((pipeline_layout, set_layout))
 }
-// TODO: Macos doesn't support this but keep it for the future
-// fn create_shader_object<P: AsRef<Path>>(
-//     shader_object_device_fns: &ext::shader_object::Device,
-//     shader_path: P,
-//     shader_stage_flags: vk::ShaderStageFlags,
-// ) -> anyhow::Result<vk::ShaderEXT> {
-//     let vert_code = load_shader(shader_path)?;
-//     let name = unsafe { std::ffi::CStr::from_bytes_with_nul_unchecked(b"main\0") };
-//     let vert_create_info = vk::ShaderCreateInfoEXT::default()
-//         .stage(shader_stage_flags)
-//         .code_type(vk::ShaderCodeTypeEXT::BINARY)
-//         .code(&vert_code)
-//         .name(name);
-//     // pub next_stage: ShaderStageFlags,
-//     let shader_res = unsafe { shader_object_device_fns.create_shaders(&[vert_create_info], None) };
-//     shader_res
-//         .map(|shaders| {
-//             shaders
-//                 .first()
-//                 .cloned()
-//                 .context("vkCreateShadersEXT failed to return a shader")
-//         })
-//         .map_err(|(_, result)| {
-//             anyhow!(
-//                 "shader creation in {:?} failed with {}",
-//                 shader_stage_flags,
-//                 result
-//             )
-//         })?
-// }
-//
+
 pub fn normalize_mesh(vertices: &mut [Vertex]) {
     let mut positions = vertices.iter_mut().map(|v| v.position).collect::<Vec<_>>();
     if positions.is_empty() {
@@ -376,21 +284,16 @@ fn main() -> anyhow::Result<()> {
     let instance = forge::instance::Instance::new(VALIDATION_ENABLED)?;
 
     let surface = Surface::new(instance.clone(), &window)?;
-    let physical_device = create_physical_device(&instance, &surface)?;
-    let device = Device::new(&instance, &physical_device)?;
-    let memory_properties = unsafe {
-        instance
-            .instance
-            .get_physical_device_memory_properties(physical_device)
-    };
+    let physical_device = PhysicalDevice::new(&instance, &surface)?;
+    let device = Device::new(&instance, &physical_device.handle)?;
 
     let push_desc_loader = khr::push_descriptor::Device::new(&instance.instance, &device.handle);
 
-    let format = get_suitable_format(physical_device, &surface)?;
+    let format = get_suitable_format(physical_device.handle, &surface)?;
     let render_pass = create_render_pass(&device.handle, format.format)?;
 
     let surface_capabilities =
-        surface.get_physical_device_surface_capabilities_khr(physical_device)?;
+        surface.get_physical_device_surface_capabilities_khr(physical_device.handle)?;
     let mut extent = surface_capabilities.current_extent;
 
     let mut swapchain = Swapchain::new(
@@ -398,7 +301,7 @@ fn main() -> anyhow::Result<()> {
         &device.handle,
         surface.surface,
         render_pass,
-        memory_properties,
+        physical_device.memory_properties,
         format,
         extent,
     )?;
@@ -516,7 +419,7 @@ fn main() -> anyhow::Result<()> {
 
     let vertex_buffer = Buffer::from_data(
         &device.handle,
-        memory_properties,
+        physical_device.memory_properties,
         vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
         vk::BufferUsageFlags::STORAGE_BUFFER,
         vertices,
@@ -524,7 +427,7 @@ fn main() -> anyhow::Result<()> {
 
     let index_buffer = Buffer::from_data(
         &device.handle,
-        memory_properties,
+        physical_device.memory_properties,
         vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
         vk::BufferUsageFlags::INDEX_BUFFER,
         indices,
@@ -533,7 +436,7 @@ fn main() -> anyhow::Result<()> {
     let start_time = std::time::Instant::now();
     while !window.should_close() {
         let surface_capabilities =
-            surface.get_physical_device_surface_capabilities_khr(physical_device)?;
+            surface.get_physical_device_surface_capabilities_khr(physical_device.handle)?;
 
         if surface_capabilities.current_extent.width != extent.width
             || surface_capabilities.current_extent.height != extent.height
@@ -545,7 +448,7 @@ fn main() -> anyhow::Result<()> {
             swapchain = swapchain.recreate(
                 surface.surface,
                 render_pass,
-                memory_properties,
+                physical_device.memory_properties,
                 format,
                 extent,
             )?;
