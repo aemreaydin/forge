@@ -1,5 +1,6 @@
 use anyhow::Context;
 use ash::{vk, Device};
+use bytemuck::{Pod, Zeroable};
 use std::ptr::copy;
 
 pub trait DeviceHandled {
@@ -7,7 +8,7 @@ pub trait DeviceHandled {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct Vertex {
     pub position: nalgebra_glm::Vec4,
     pub normal: nalgebra_glm::Vec4,
@@ -35,7 +36,7 @@ pub struct Buffer<T> {
     device: Device,
 }
 
-impl<T> Buffer<T> {
+impl<T: Pod> Buffer<T> {
     pub fn from_data(
         device: &Device,
         memory_properties: vk::PhysicalDeviceMemoryProperties,

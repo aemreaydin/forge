@@ -161,6 +161,10 @@ impl Instance {
         }))
     }
 
+    pub fn handle(&self) -> vk::Instance {
+        self.instance.handle()
+    }
+
     pub fn destroy(&self) {
         unsafe {
             if let Some(debug_utils) = &self.debug_utils {

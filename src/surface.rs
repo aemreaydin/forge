@@ -1,6 +1,5 @@
 use crate::instance::Instance;
 use ash::{khr, vk};
-use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use std::sync::Arc;
 
 pub struct Surface {
@@ -10,37 +9,16 @@ pub struct Surface {
 }
 
 impl Surface {
-    pub fn new(
-        instance: Arc<Instance>,
-        handle: &(impl HasDisplayHandle + HasWindowHandle),
-    ) -> anyhow::Result<Self> {
-        unsafe {
-            let entry = &instance.entry;
-            let loader = khr::surface::Instance::new(entry, &instance.instance);
+    pub fn new(instance: Arc<Instance>, window: &sdl3::video::Window) -> anyhow::Result<Self> {
+        let entry = &instance.entry;
+        let loader = khr::surface::Instance::new(entry, &instance.instance);
+        let surface = window.vulkan_create_surface(instance.handle())?;
 
-            let raw_display_handle = handle
-                .display_handle()
-                .expect("failed to get raw display handle")
-                .as_raw();
-            let raw_window_handle = handle
-                .window_handle()
-                .expect("failed to get raw window handle")
-                .as_raw();
-
-            let surface = ash_window::create_surface(
-                entry,
-                &instance.instance,
-                raw_display_handle,
-                raw_window_handle,
-                None,
-            )?;
-
-            Ok(Self {
-                surface,
-                loader,
-                instance,
-            })
-        }
+        Ok(Self {
+            surface,
+            loader,
+            instance,
+        })
     }
 
     pub fn destroy(&self) {

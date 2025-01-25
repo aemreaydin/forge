@@ -1,6 +1,6 @@
+use crate::model::load_model;
 use anyhow::{anyhow, Context};
 use ash::{khr, vk};
-use core::f32;
 use either::Either;
 use forge::{
     buffer::{Buffer, Vertex},
@@ -10,10 +10,12 @@ use forge::{
     surface::Surface,
     swapchain::Swapchain,
 };
-use glfw::{Action, Context as GlfwContext, Key};
-use nalgebra_glm::{Vec2, Vec3, Vec4};
+use nalgebra_glm::Vec3;
+use sdl3::{event::Event, keyboard::Keycode};
 use std::path::Path;
 use tobj::LoadOptions;
+
+mod model;
 
 const VALIDATION_ENABLED: bool = cfg!(debug_assertions);
 
@@ -107,7 +109,9 @@ fn create_render_pass(device: &ash::Device, format: vk::Format) -> anyhow::Resul
 
 fn load_shader<P: AsRef<Path>, T: bytemuck::Pod>(path: P) -> anyhow::Result<Vec<T>> {
     let bytes = std::fs::read(path)?;
-    Ok(bytemuck::try_cast_slice::<u8, T>(&bytes)?.to_vec())
+    Ok(bytemuck::try_cast_slice::<u8, T>(&bytes)
+        .expect("Failed to cast shader to u8.")
+        .to_vec())
 }
 
 fn create_shader_module<P: AsRef<Path>>(
@@ -263,6 +267,7 @@ pub fn normalize_mesh(vertices: &mut [Vertex]) {
         .enumerate()
         .for_each(|(ind, v)| v.position = positions[ind]);
 }
+
 fn main() -> anyhow::Result<()> {
     let mesh_path = std::env::args()
         .nth(1)
@@ -272,30 +277,30 @@ fn main() -> anyhow::Result<()> {
         .format_indent(None)
         .format_timestamp_nanos()
         .init();
-    let mut glfw = glfw::init_no_callbacks()?;
-    glfw.window_hint(glfw::WindowHint::ClientApi(glfw::ClientApiHint::NoApi));
-    glfw.window_hint(glfw::WindowHint::ScaleToMonitor(false));
-    let (mut window, events) = glfw
-        .create_window(1920, 1080, "forge", glfw::WindowMode::Windowed)
-        .context("failed to create a glfw window")?;
-    window.set_key_polling(true);
-    window.make_current();
+
+    let sdl_context = sdl3::init()?;
+    let video_subsystem = sdl_context.video().unwrap();
+    let window = video_subsystem
+        .window("forge", 1920, 1080)
+        .position_centered()
+        .vulkan()
+        .resizable()
+        .build()
+        .unwrap();
+    let mut event_pump = sdl_context.event_pump()?;
 
     let instance = forge::instance::Instance::new(VALIDATION_ENABLED)?;
-
     let surface = Surface::new(instance.clone(), &window)?;
     let physical_device = PhysicalDevice::new(&instance, &surface)?;
     let device = Device::new(&instance, &physical_device.handle)?;
 
     let push_desc_loader = khr::push_descriptor::Device::new(&instance.instance, &device.handle);
-
     let format = get_suitable_format(physical_device.handle, &surface)?;
     let render_pass = create_render_pass(&device.handle, format.format)?;
 
     let surface_capabilities =
         surface.get_physical_device_surface_capabilities_khr(physical_device.handle)?;
     let mut extent = surface_capabilities.current_extent;
-
     let mut swapchain = Swapchain::new(
         &instance.instance,
         &device.handle,
@@ -375,47 +380,7 @@ fn main() -> anyhow::Result<()> {
         },
     )?;
 
-    let (vertices, indices) = {
-        let model = models.first().context("Failed to get the model")?;
-        let mesh = &model.mesh;
-
-        let mut vertices = Vec::new();
-        let indices = mesh.indices.clone();
-
-        let positions = mesh.positions.as_slice();
-        let normals = mesh.normals.as_slice();
-        let texcoords = mesh.texcoords.as_slice();
-
-        let vertex_count = positions.len() / 3;
-
-        for i in 0..vertex_count {
-            let position = Vec4::new(
-                positions[i * 3],
-                positions[i * 3 + 1],
-                positions[i * 3 + 2],
-                1.0,
-            );
-            let normal = if !mesh.normals.is_empty() {
-                Vec4::new(normals[i * 3], normals[i * 3 + 1], normals[i * 3 + 2], 1.0)
-            } else {
-                [0.0, 0.0, 0.0, 1.0].into()
-            };
-            let tex_coords = if !mesh.texcoords.is_empty() {
-                Vec2::new(texcoords[i * 3], texcoords[i * 3 + 1])
-            } else {
-                [0.0, 0.0].into()
-            };
-            let vertex = Vertex {
-                position,
-                normal,
-                tex_coords,
-                ..Default::default()
-            };
-            vertices.push(vertex);
-        }
-        (vertices, indices)
-    };
-    // normalize_mesh(&mut vertices);
+    let (vertices, indices) = load_model(&models.first().context("Failed to load model.")?.clone());
 
     let vertex_buffer = Buffer::from_data(
         &device.handle,
@@ -434,7 +399,7 @@ fn main() -> anyhow::Result<()> {
     )?;
 
     let start_time = std::time::Instant::now();
-    while !window.should_close() {
+    while !handle_window_event(&mut event_pump) {
         let surface_capabilities =
             surface.get_physical_device_surface_capabilities_khr(physical_device.handle)?;
 
@@ -730,11 +695,6 @@ fn main() -> anyhow::Result<()> {
             device.handle.wait_for_fences(fences, true, u64::MAX)?;
             device.handle.reset_fences(fences)?;
         };
-
-        glfw.poll_events();
-        for (_, event) in glfw::flush_messages(&events) {
-            handle_window_event(&mut window, event);
-        }
     }
 
     unsafe {
@@ -779,10 +739,16 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn handle_window_event(window: &mut glfw::Window, event: glfw::WindowEvent) {
-    match event {
-        glfw::WindowEvent::Key(Key::Escape, _, Action::Press, _) => window.set_should_close(true),
-        glfw::WindowEvent::Key(Key::Space, _, Action::Press, _) => {}
-        _ => {}
+fn handle_window_event(event_pump: &mut sdl3::EventPump) -> bool {
+    for event in event_pump.poll_iter() {
+        match event {
+            Event::Quit { .. }
+            | Event::KeyDown {
+                keycode: Some(Keycode::Escape),
+                ..
+            } => return true,
+            _ => {}
+        }
     }
+    false
 }
