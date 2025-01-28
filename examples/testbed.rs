@@ -4,8 +4,7 @@ use ash::{khr, vk};
 use either::Either;
 use forge::{
     buffer::{Buffer, Vertex},
-    device::Device,
-    physical_device::PhysicalDevice,
+    context::VulkanContext,
     shader_object::Shader,
     surface::Surface,
     swapchain::Swapchain,
@@ -16,8 +15,6 @@ use std::path::Path;
 use tobj::LoadOptions;
 
 mod model;
-
-const VALIDATION_ENABLED: bool = cfg!(debug_assertions);
 
 fn get_suitable_format(
     physical_device: vk::PhysicalDevice,
@@ -34,10 +31,13 @@ fn get_suitable_format(
         .context("failed to find a suitable surface format")
 }
 
-fn create_command_pool(device: &ash::Device) -> anyhow::Result<vk::CommandPool> {
+fn create_command_pool(
+    device: &ash::Device,
+    queue_family_index: u32,
+) -> anyhow::Result<vk::CommandPool> {
     let create_info = vk::CommandPoolCreateInfo::default()
-        .queue_family_index(0)
-        .flags(vk::CommandPoolCreateFlags::TRANSIENT); // TODO: Queue family index hard coded
+        .queue_family_index(queue_family_index)
+        .flags(vk::CommandPoolCreateFlags::TRANSIENT);
 
     Ok(unsafe { device.create_command_pool(&create_info, None)? })
 }
@@ -289,33 +289,30 @@ fn main() -> anyhow::Result<()> {
         .unwrap();
     let mut event_pump = sdl_context.event_pump()?;
 
-    let instance = forge::instance::Instance::new(VALIDATION_ENABLED)?;
-    let surface = Surface::new(instance.clone(), &window)?;
-    let physical_device = PhysicalDevice::new(&instance, &surface)?;
-    let device = Device::new(&instance, &physical_device.handle)?;
+    let vulkan_context = VulkanContext::new(&window)?;
 
-    let push_desc_loader = khr::push_descriptor::Device::new(&instance.instance, &device.handle);
-    let format = get_suitable_format(physical_device.handle, &surface)?;
-    let render_pass = create_render_pass(&device.handle, format.format)?;
+    let push_desc_loader =
+        khr::push_descriptor::Device::new(vulkan_context.instance(), vulkan_context.device());
+    let format = get_suitable_format(vulkan_context.physical_device(), &vulkan_context.surface)?;
+    let render_pass = create_render_pass(vulkan_context.device(), format.format)?;
 
-    let surface_capabilities =
-        surface.get_physical_device_surface_capabilities_khr(physical_device.handle)?;
+    let surface_capabilities = vulkan_context
+        .surface
+        .get_physical_device_surface_capabilities_khr(vulkan_context.physical_device())?;
     let mut extent = surface_capabilities.current_extent;
     let mut swapchain = Swapchain::new(
-        &instance.instance,
-        &device.handle,
-        surface.surface,
+        vulkan_context.instance(),
+        vulkan_context.device(),
+        vulkan_context.surface(),
         render_pass,
-        physical_device.memory_properties,
+        vulkan_context.physical_device.memory_properties,
         format,
         extent,
     )?;
 
-    let queue = unsafe { device.handle.get_device_queue(0, 0) };
+    let (pipeline_layout, descriptor_set_layout) = create_pipeline_layout(vulkan_context.device())?;
 
-    let (pipeline_layout, descriptor_set_layout) = create_pipeline_layout(&device.handle)?;
-
-    let either_pipeline_or_objects = match device.device_support.shader_ext {
+    let either_pipeline_or_objects = match vulkan_context.device.device_support.shader_ext {
         true => {
             log::info!("Using Shader Object");
             let push_constant_ranges = &[vk::PushConstantRange::default()
@@ -323,8 +320,8 @@ fn main() -> anyhow::Result<()> {
                 .offset(0)
                 .size(size_of::<nalgebra_glm::Mat4>() as u32)];
             let vert_shader = forge::shader_object::Shader::new(
-                &instance.instance,
-                &device.handle,
+                vulkan_context.instance(),
+                vulkan_context.device(),
                 c"main",
                 vk::ShaderStageFlags::VERTEX,
                 &load_shader::<_, u8>("shaders/triangle.vert.spv")?,
@@ -332,8 +329,8 @@ fn main() -> anyhow::Result<()> {
                 push_constant_ranges,
             )?;
             let frag_shader = forge::shader_object::Shader::new(
-                &instance.instance,
-                &device.handle,
+                vulkan_context.instance(),
+                vulkan_context.device(),
                 c"main",
                 vk::ShaderStageFlags::FRAGMENT,
                 &load_shader::<_, u8>("shaders/triangle.frag.spv")?,
@@ -345,10 +342,12 @@ fn main() -> anyhow::Result<()> {
         }
         false => {
             log::info!("Using Graphics Pipeline");
-            let vert_module = create_shader_module(&device.handle, "shaders/triangle.vert.spv")?;
-            let frag_module = create_shader_module(&device.handle, "shaders/triangle.frag.spv")?;
+            let vert_module =
+                create_shader_module(vulkan_context.device(), "shaders/triangle.vert.spv")?;
+            let frag_module =
+                create_shader_module(vulkan_context.device(), "shaders/triangle.frag.spv")?;
             Either::Right(create_graphics_pipeline(
-                &device.handle,
+                vulkan_context.device(),
                 render_pass,
                 pipeline_layout,
                 vert_module,
@@ -357,19 +356,22 @@ fn main() -> anyhow::Result<()> {
         }
     };
 
-    let command_pool = create_command_pool(&device.handle)?;
+    let command_pool = create_command_pool(
+        vulkan_context.device(),
+        vulkan_context.physical_device.queue_indices.graphics,
+    )?;
     let command_buffer_allocate_info = vk::CommandBufferAllocateInfo::default()
         .command_buffer_count(1)
         .command_pool(command_pool);
     let command_buffers = unsafe {
-        device
-            .handle
+        vulkan_context
+            .device()
             .allocate_command_buffers(&command_buffer_allocate_info)?
     };
 
-    let mut acquire_semaphore = create_semaphore(&device.handle)?;
-    let mut present_semaphore = create_semaphore(&device.handle)?;
-    let fence = create_fence(&device.handle)?;
+    let mut acquire_semaphore = create_semaphore(vulkan_context.device())?;
+    let mut present_semaphore = create_semaphore(vulkan_context.device())?;
+    let fence = create_fence(vulkan_context.device())?;
 
     let (models, _materials) = tobj::load_obj(
         mesh_path,
@@ -383,16 +385,16 @@ fn main() -> anyhow::Result<()> {
     let (vertices, indices) = load_model(&models.first().context("Failed to load model.")?.clone());
 
     let vertex_buffer = Buffer::from_data(
-        &device.handle,
-        physical_device.memory_properties,
+        vulkan_context.device(),
+        vulkan_context.physical_device.memory_properties,
         vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
         vk::BufferUsageFlags::STORAGE_BUFFER,
         vertices,
     )?;
 
     let index_buffer = Buffer::from_data(
-        &device.handle,
-        physical_device.memory_properties,
+        vulkan_context.device(),
+        vulkan_context.physical_device.memory_properties,
         vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
         vk::BufferUsageFlags::INDEX_BUFFER,
         indices,
@@ -400,38 +402,43 @@ fn main() -> anyhow::Result<()> {
 
     let start_time = std::time::Instant::now();
     while !handle_window_event(&mut event_pump) {
-        let surface_capabilities =
-            surface.get_physical_device_surface_capabilities_khr(physical_device.handle)?;
+        let surface_capabilities = vulkan_context
+            .surface
+            .get_physical_device_surface_capabilities_khr(vulkan_context.physical_device())?;
 
         if surface_capabilities.current_extent.width != extent.width
             || surface_capabilities.current_extent.height != extent.height
         {
             unsafe {
-                device.handle.device_wait_idle()?;
+                vulkan_context.device().device_wait_idle()?;
             }
             extent = surface_capabilities.current_extent;
             swapchain = swapchain.recreate(
-                surface.surface,
+                vulkan_context.surface(),
                 render_pass,
-                physical_device.memory_properties,
+                vulkan_context.physical_device.memory_properties,
                 format,
                 extent,
             )?;
 
             unsafe {
-                device.handle.destroy_semaphore(acquire_semaphore, None);
-                device.handle.destroy_semaphore(present_semaphore, None);
+                vulkan_context
+                    .device()
+                    .destroy_semaphore(acquire_semaphore, None);
+                vulkan_context
+                    .device()
+                    .destroy_semaphore(present_semaphore, None);
 
-                acquire_semaphore = create_semaphore(&device.handle)?;
-                present_semaphore = create_semaphore(&device.handle)?;
+                acquire_semaphore = create_semaphore(vulkan_context.device())?;
+                present_semaphore = create_semaphore(vulkan_context.device())?;
             }
         }
 
         swapchain.acquire_next_image(acquire_semaphore, vk::Fence::null())?;
 
         unsafe {
-            device
-                .handle
+            vulkan_context
+                .device()
                 .reset_command_pool(command_pool, vk::CommandPoolResetFlags::empty())?
         }
 
@@ -439,8 +446,8 @@ fn main() -> anyhow::Result<()> {
         let begin_info = vk::CommandBufferBeginInfo::default()
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
         unsafe {
-            device
-                .handle
+            vulkan_context
+                .device()
                 .begin_command_buffer(command_buffer, &begin_info)?;
 
             let to_transfer_barrier = vk::ImageMemoryBarrier::default()
@@ -458,7 +465,7 @@ fn main() -> anyhow::Result<()> {
                 })
                 .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                 .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED);
-            device.handle.cmd_pipeline_barrier(
+            vulkan_context.device().cmd_pipeline_barrier(
                 command_buffer,
                 vk::PipelineStageFlags::TOP_OF_PIPE,
                 vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
@@ -489,12 +496,16 @@ fn main() -> anyhow::Result<()> {
                 .height(-(swapchain.extent.height as f32))
                 .min_depth(0.0)
                 .max_depth(1.0)];
-            device.handle.cmd_set_viewport(command_buffer, 0, viewports);
+            vulkan_context
+                .device()
+                .cmd_set_viewport(command_buffer, 0, viewports);
             let scissors = &[vk::Rect2D {
                 extent: swapchain.extent,
                 offset: vk::Offset2D { x: 0, y: 0 },
             }];
-            device.handle.cmd_set_scissor(command_buffer, 0, scissors);
+            vulkan_context
+                .device()
+                .cmd_set_scissor(command_buffer, 0, scissors);
 
             let buffer_info = &[vk::DescriptorBufferInfo::default()
                 .buffer(vertex_buffer.buffer)
@@ -547,13 +558,18 @@ fn main() -> anyhow::Result<()> {
                         .layer_count(1)
                         .color_attachments(color_attachments)
                         .depth_attachment(&depth_attachment);
-                    device
-                        .handle
+                    vulkan_context
+                        .device()
                         .cmd_begin_rendering(command_buffer, &rendering_info);
                     vert_shader.bind_shader(command_buffer, &[vk::ShaderStageFlags::VERTEX]);
                     frag_shader.bind_shader(command_buffer, &[vk::ShaderStageFlags::FRAGMENT]);
                     Shader::set_vertex_input(command_buffer, &[], &[]);
-                    Shader::set_dynamic_state(&device.handle, command_buffer, viewports, scissors);
+                    Shader::set_dynamic_state(
+                        vulkan_context.device(),
+                        command_buffer,
+                        viewports,
+                        scissors,
+                    );
                     push_desc_loader.cmd_push_descriptor_set(
                         command_buffer,
                         vk::PipelineBindPoint::GRAPHICS,
@@ -561,13 +577,13 @@ fn main() -> anyhow::Result<()> {
                         0,
                         descriptor_writes,
                     );
-                    device.handle.cmd_bind_index_buffer(
+                    vulkan_context.device().cmd_bind_index_buffer(
                         command_buffer,
                         index_buffer.buffer,
                         0,
                         vk::IndexType::UINT32,
                     );
-                    device.handle.cmd_push_constants(
+                    vulkan_context.device().cmd_push_constants(
                         command_buffer,
                         pipeline_layout,
                         vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, // same as above
@@ -577,7 +593,7 @@ fn main() -> anyhow::Result<()> {
                             std::mem::size_of::<nalgebra_glm::Mat4>(),
                         ),
                     );
-                    device.handle.cmd_draw_indexed(
+                    vulkan_context.device().cmd_draw_indexed(
                         command_buffer,
                         index_buffer.data.len() as u32,
                         1,
@@ -585,7 +601,7 @@ fn main() -> anyhow::Result<()> {
                         0,
                         0,
                     );
-                    device.handle.cmd_end_rendering(command_buffer);
+                    vulkan_context.device().cmd_end_rendering(command_buffer);
                 }
                 Either::Right(graphics_pipeline) => {
                     let render_pass_begin = vk::RenderPassBeginInfo::default()
@@ -596,7 +612,7 @@ fn main() -> anyhow::Result<()> {
                             extent: swapchain.extent,
                             offset: vk::Offset2D { x: 0, y: 0 },
                         });
-                    device.handle.cmd_begin_render_pass(
+                    vulkan_context.device().cmd_begin_render_pass(
                         command_buffer,
                         &render_pass_begin,
                         vk::SubpassContents::INLINE,
@@ -609,13 +625,13 @@ fn main() -> anyhow::Result<()> {
                         descriptor_writes,
                     );
 
-                    device.handle.cmd_bind_index_buffer(
+                    vulkan_context.device().cmd_bind_index_buffer(
                         command_buffer,
                         index_buffer.buffer,
                         0,
                         vk::IndexType::UINT32,
                     );
-                    device.handle.cmd_push_constants(
+                    vulkan_context.device().cmd_push_constants(
                         command_buffer,
                         pipeline_layout,
                         vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, // same as above
@@ -625,12 +641,12 @@ fn main() -> anyhow::Result<()> {
                             std::mem::size_of::<nalgebra_glm::Mat4>(),
                         ),
                     );
-                    device.handle.cmd_bind_pipeline(
+                    vulkan_context.device().cmd_bind_pipeline(
                         command_buffer,
                         vk::PipelineBindPoint::GRAPHICS,
                         *graphics_pipeline,
                     );
-                    device.handle.cmd_draw_indexed(
+                    vulkan_context.device().cmd_draw_indexed(
                         command_buffer,
                         index_buffer.data.len() as u32,
                         1,
@@ -638,7 +654,7 @@ fn main() -> anyhow::Result<()> {
                         0,
                         0,
                     );
-                    device.handle.cmd_end_render_pass(command_buffer);
+                    vulkan_context.device().cmd_end_render_pass(command_buffer);
                 }
             }
 
@@ -659,7 +675,7 @@ fn main() -> anyhow::Result<()> {
                 .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                 .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED);
 
-            device.handle.cmd_pipeline_barrier(
+            vulkan_context.device().cmd_pipeline_barrier(
                 command_buffer,
                 vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
                 vk::PipelineStageFlags::BOTTOM_OF_PIPE,
@@ -669,7 +685,7 @@ fn main() -> anyhow::Result<()> {
                 &[to_present_barrier],
             );
 
-            device.handle.end_command_buffer(command_buffer)?;
+            vulkan_context.device().end_command_buffer(command_buffer)?;
 
             let cmds = &[command_buffer];
             let waits = &[acquire_semaphore];
@@ -681,7 +697,11 @@ fn main() -> anyhow::Result<()> {
                 .wait_semaphores(waits)
                 .signal_semaphores(presents)
                 .wait_dst_stage_mask(stage_flags);
-            device.handle.queue_submit(queue, &[submit_info], fence)?;
+            vulkan_context.device().queue_submit(
+                vulkan_context.graphics_queue,
+                &[submit_info],
+                fence,
+            )?;
 
             let swapchains = &[swapchain.swapchain()];
             let present_info = vk::PresentInfoKHR::default()
@@ -689,31 +709,47 @@ fn main() -> anyhow::Result<()> {
                 .swapchains(swapchains)
                 .wait_semaphores(presents);
 
-            swapchain.queue_present(queue, &present_info)?;
+            swapchain.queue_present(vulkan_context.graphics_queue, &present_info)?;
 
             let fences = &[fence];
-            device.handle.wait_for_fences(fences, true, u64::MAX)?;
-            device.handle.reset_fences(fences)?;
+            vulkan_context
+                .device()
+                .wait_for_fences(fences, true, u64::MAX)?;
+            vulkan_context.device().reset_fences(fences)?;
         };
     }
 
     unsafe {
-        device.handle.device_wait_idle()?;
+        vulkan_context.device().device_wait_idle()?;
 
-        device.handle.free_memory(vertex_buffer.memory, None);
-        device.handle.destroy_buffer(vertex_buffer.buffer, None);
+        vulkan_context
+            .device()
+            .free_memory(vertex_buffer.memory, None);
+        vulkan_context
+            .device()
+            .destroy_buffer(vertex_buffer.buffer, None);
 
-        device.handle.free_memory(index_buffer.memory, None);
-        device.handle.destroy_buffer(index_buffer.buffer, None);
+        vulkan_context
+            .device()
+            .free_memory(index_buffer.memory, None);
+        vulkan_context
+            .device()
+            .destroy_buffer(index_buffer.buffer, None);
 
-        device.handle.destroy_fence(fence, None);
-        device.handle.destroy_semaphore(acquire_semaphore, None);
-        device.handle.destroy_semaphore(present_semaphore, None);
+        vulkan_context.device().destroy_fence(fence, None);
+        vulkan_context
+            .device()
+            .destroy_semaphore(acquire_semaphore, None);
+        vulkan_context
+            .device()
+            .destroy_semaphore(present_semaphore, None);
 
-        device
-            .handle
+        vulkan_context
+            .device()
             .free_command_buffers(command_pool, &command_buffers);
-        device.handle.destroy_command_pool(command_pool, None);
+        vulkan_context
+            .device()
+            .destroy_command_pool(command_pool, None);
 
         match either_pipeline_or_objects {
             Either::Left((vert_shader, frag_shader)) => {
@@ -721,21 +757,23 @@ fn main() -> anyhow::Result<()> {
                 frag_shader.destroy();
             }
             Either::Right(graphics_pipeline) => {
-                device.handle.destroy_pipeline(graphics_pipeline, None);
+                vulkan_context
+                    .device()
+                    .destroy_pipeline(graphics_pipeline, None);
             }
         }
-        device
-            .handle
+        vulkan_context
+            .device()
             .destroy_descriptor_set_layout(descriptor_set_layout, None);
-        device.handle.destroy_pipeline_layout(pipeline_layout, None);
+        vulkan_context
+            .device()
+            .destroy_pipeline_layout(pipeline_layout, None);
 
         swapchain.destroy();
-        device.handle.destroy_render_pass(render_pass, None);
-
-        device.handle.destroy_device(None);
+        vulkan_context
+            .device()
+            .destroy_render_pass(render_pass, None);
     }
-    surface.destroy();
-    instance.destroy();
     Ok(())
 }
 

@@ -2,6 +2,8 @@ use anyhow::anyhow;
 use ash::{ext, khr, vk, Entry};
 use std::{ffi::CStr, sync::Arc};
 
+use crate::vulkan_handle;
+
 const VALIDATION_LAYER: &CStr = c"VK_LAYER_KHRONOS_validation";
 const OPTIONAL_INSTANCE_LAYERS: &[&std::ffi::CStr] = &[c"VK_LAYER_KHRONOS_shader_object"];
 
@@ -101,15 +103,14 @@ impl DebugUtils {
 }
 
 pub struct Instance {
-    pub(crate) entry: Entry,
-    pub instance: ash::Instance,
-
+    instance: ash::Instance,
     debug_utils: Option<DebugUtils>,
 }
 
+vulkan_handle!(Instance, instance, ash::Instance);
+
 impl Instance {
-    pub fn new(enable_validation: bool) -> anyhow::Result<Arc<Self>> {
-        let entry = unsafe { Entry::load()? };
+    pub fn new(entry: &Entry, enable_validation: bool) -> anyhow::Result<Arc<Self>> {
         let app_name = c"forge";
 
         let layer_properties = unsafe { entry.enumerate_instance_layer_properties()? };
@@ -155,14 +156,9 @@ impl Instance {
         };
 
         Ok(Arc::new(Self {
-            entry,
             instance,
             debug_utils,
         }))
-    }
-
-    pub fn handle(&self) -> vk::Instance {
-        self.instance.handle()
     }
 
     pub fn destroy(&self) {

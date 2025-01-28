@@ -1,4 +1,4 @@
-use crate::{instance::Instance, surface::Surface};
+use crate::{instance::Instance, surface::Surface, vulkan_handle};
 use anyhow::anyhow;
 use ash::vk::{self, PhysicalDeviceMemoryProperties};
 
@@ -13,59 +13,143 @@ fn i8_array_to_string(slice: &[i8]) -> String {
     .to_string()
 }
 
-pub struct PhysicalDevice {
-    pub handle: ash::vk::PhysicalDevice,
+#[derive(Debug)]
+pub struct QueueIndices {
+    pub graphics: u32,
+    pub compute: u32,
+    pub transfer: u32,
+}
 
+pub struct PhysicalDevice {
+    physical_device: ash::vk::PhysicalDevice,
+
+    pub queue_indices: QueueIndices,
+    pub properties: vk::PhysicalDeviceProperties,
+    pub features: vk::PhysicalDeviceFeatures,
     pub memory_properties: PhysicalDeviceMemoryProperties,
 }
 
+vulkan_handle!(PhysicalDevice, physical_device, ash::vk::PhysicalDevice);
+
 impl PhysicalDevice {
     pub fn new(instance: &Instance, surface: &Surface) -> anyhow::Result<Self> {
-        let physical_devices = unsafe { instance.instance.enumerate_physical_devices()? };
+        let physical_devices = unsafe { instance.handle().enumerate_physical_devices()? };
 
         let mut selected_device: Option<vk::PhysicalDevice> = None;
         let mut fallback_device: Option<vk::PhysicalDevice> = None;
+        let mut queue_indices = None;
         for device in &physical_devices {
-            let properties = unsafe { instance.instance.get_physical_device_properties(*device) };
-            let surface_support = surface.get_physical_device_surface_support_khr(*device, 0)?; // TODO: Queue family index is hardcoded
-                                                                                                // TODO: These are not being used right now
-            let _features = unsafe { instance.instance.get_physical_device_features(*device) };
+            let properties = unsafe { instance.handle().get_physical_device_properties(*device) };
             let is_discrete = properties.device_type == vk::PhysicalDeviceType::DISCRETE_GPU;
 
-            match surface_support {
-                true if is_discrete => {
-                    selected_device = Some(*device);
-                }
-                true => fallback_device = Some(*device),
-                false => {}
+            queue_indices = Some(Self::find_queue_family_indices(instance, surface, device)?);
+
+            if is_discrete {
+                selected_device = Some(*device);
+            } else {
+                fallback_device = Some(*device);
             }
         }
 
-        match (selected_device, fallback_device) {
+        let physical_device = match (selected_device, fallback_device) {
             (Some(device), _) => {
-                let props = unsafe { instance.instance.get_physical_device_properties(device) };
+                let props = unsafe { instance.handle().get_physical_device_properties(device) };
                 log::info!(
                     "Using discrete gpu: {}",
                     i8_array_to_string(&props.device_name)
                 );
-                Ok(Self {
-                    handle: device,
-                    memory_properties: Self::get_memory_properties(instance, device),
-                })
+                Ok(device)
             }
             (_, Some(fallback)) => {
-                let props = unsafe { instance.instance.get_physical_device_properties(fallback) };
+                let props = unsafe { instance.handle().get_physical_device_properties(fallback) };
                 log::info!(
                     "Using fallback device: {}",
                     i8_array_to_string(&props.device_name)
                 );
-                Ok(Self {
-                    handle: fallback,
-                    memory_properties: Self::get_memory_properties(instance, fallback),
-                })
+                Ok(fallback)
             }
             _ => Err(anyhow!("no suitable physical devices found")),
+        }?;
+        log::info!("{:?}", queue_indices);
+        unsafe {
+            Ok(Self {
+                physical_device,
+                queue_indices: queue_indices.expect("Failed to find queue indices."),
+                properties: instance
+                    .handle()
+                    .get_physical_device_properties(physical_device),
+                features: instance
+                    .handle()
+                    .get_physical_device_features(physical_device),
+                memory_properties: Self::get_memory_properties(instance, physical_device),
+            })
         }
+    }
+
+    fn find_queue_family_indices(
+        instance: &Instance,
+        surface: &Surface,
+        device: &vk::PhysicalDevice,
+    ) -> anyhow::Result<QueueIndices> {
+        let queue_props = unsafe {
+            instance
+                .handle()
+                .get_physical_device_queue_family_properties(*device)
+        };
+        let mut graphics_queue = None;
+        let mut compute_queue = None;
+        let mut transfer_queue = None;
+        queue_props.iter().enumerate().for_each(|(ind, prop)| {
+            if graphics_queue.is_none()
+                && prop.queue_flags & vk::QueueFlags::GRAPHICS == vk::QueueFlags::GRAPHICS
+            {
+                if let Ok(true) =
+                    surface.get_physical_device_surface_support_khr(*device, ind as u32)
+                {
+                    graphics_queue = Some(ind);
+                }
+            } else if compute_queue.is_none()
+                && prop.queue_flags & vk::QueueFlags::COMPUTE == vk::QueueFlags::COMPUTE
+            {
+                compute_queue = Some(ind);
+            } else if transfer_queue.is_none()
+                && prop.queue_flags & vk::QueueFlags::TRANSFER == vk::QueueFlags::TRANSFER
+            {
+                transfer_queue = Some(ind);
+            }
+        });
+
+        let graphics_queue_ind =
+            graphics_queue.expect("Failed to find a queue index that supports graphics.") as u32;
+
+        let compute_queue_ind = if let Some(compute_queue_ind) = compute_queue {
+            Ok(compute_queue_ind as u32)
+        } else if queue_props[graphics_queue_ind as usize].queue_flags & vk::QueueFlags::COMPUTE
+            == vk::QueueFlags::COMPUTE
+        {
+            Ok(graphics_queue_ind)
+        } else {
+            Err(anyhow!("Failed to find a compute queue."))
+        }?;
+
+        let transfer_queue_ind = if let Some(transfer_queue_ind) = transfer_queue {
+            Ok(transfer_queue_ind as u32)
+        } else if queue_props[graphics_queue_ind as usize].queue_flags & vk::QueueFlags::TRANSFER
+            == vk::QueueFlags::TRANSFER
+        {
+            Ok(graphics_queue_ind)
+        } else if queue_props[compute_queue_ind as usize].queue_flags & vk::QueueFlags::TRANSFER
+            == vk::QueueFlags::TRANSFER
+        {
+            Ok(compute_queue_ind)
+        } else {
+            Err(anyhow!("Failed to find a tranfer queue."))
+        }?;
+        Ok(QueueIndices {
+            graphics: graphics_queue_ind,
+            compute: compute_queue_ind,
+            transfer: transfer_queue_ind,
+        })
     }
 
     fn get_memory_properties(
@@ -74,7 +158,7 @@ impl PhysicalDevice {
     ) -> PhysicalDeviceMemoryProperties {
         unsafe {
             instance
-                .instance
+                .handle()
                 .get_physical_device_memory_properties(device)
         }
     }

@@ -1,4 +1,4 @@
-use crate::instance::Instance;
+use crate::{instance::Instance, physical_device::PhysicalDevice, vulkan_handle};
 use anyhow::anyhow;
 use ash::{ext, khr, vk};
 use std::ffi::CStr;
@@ -18,16 +18,18 @@ pub struct DeviceSupport {
 }
 
 pub struct Device {
-    pub handle: ash::Device,
+    device: ash::Device,
     pub device_support: DeviceSupport,
 }
 
+vulkan_handle!(Device, device, ash::Device);
+
 impl Device {
-    pub fn new(instance: &Instance, physical_device: &vk::PhysicalDevice) -> anyhow::Result<Self> {
+    pub fn new(instance: &Instance, physical_device: &PhysicalDevice) -> anyhow::Result<Self> {
         let device_extensions = unsafe {
             instance
-                .instance
-                .enumerate_device_extension_properties(*physical_device)?
+                .handle()
+                .enumerate_device_extension_properties(*physical_device.handle())?
         };
         let required_extensions = Self::get_required_device_extensions(&device_extensions)?;
         let optional_extensions = Self::get_optional_device_extensions(&device_extensions);
@@ -36,12 +38,26 @@ impl Device {
             .chain(optional_extensions.iter())
             .cloned()
             .collect::<Vec<_>>();
-        let queue_create_infos = [vk::DeviceQueueCreateInfo {
-            queue_count: 1,
-            queue_family_index: 0,
-            ..Default::default()
-        }
-        .queue_priorities(&[1.0])];
+        let queue_create_infos = [
+            vk::DeviceQueueCreateInfo {
+                queue_count: 1,
+                queue_family_index: physical_device.queue_indices.graphics,
+                ..Default::default()
+            }
+            .queue_priorities(&[1.0]),
+            vk::DeviceQueueCreateInfo {
+                queue_count: 1,
+                queue_family_index: physical_device.queue_indices.compute,
+                ..Default::default()
+            }
+            .queue_priorities(&[1.0]),
+            vk::DeviceQueueCreateInfo {
+                queue_count: 1,
+                queue_family_index: physical_device.queue_indices.transfer,
+                ..Default::default()
+            }
+            .queue_priorities(&[1.0]),
+        ];
 
         // TODO: Probably clean this up
         let physical_device_features = vk::PhysicalDeviceFeatures::default().depth_bounds(true);
@@ -69,16 +85,22 @@ impl Device {
             .queue_create_infos(&queue_create_infos)
             .enabled_extension_names(&extensions)
             .push_next(&mut physical_device_features);
-        let handle = unsafe {
+        let device = unsafe {
             instance
-                .instance
-                .create_device(*physical_device, &create_info, None)?
+                .handle()
+                .create_device(*physical_device.handle(), &create_info, None)?
         };
 
         Ok(Self {
-            handle,
+            device,
             device_support,
         })
+    }
+
+    pub fn destroy(&self) {
+        unsafe {
+            self.device.destroy_device(None);
+        }
     }
 
     fn get_required_device_extensions(

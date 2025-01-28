@@ -1,24 +1,23 @@
-use crate::instance::Instance;
+use crate::{instance, vulkan_handle};
 use ash::{khr, vk};
-use std::sync::Arc;
 
 pub struct Surface {
-    pub surface: vk::SurfaceKHR,
-    pub instance: Arc<Instance>,
+    surface: vk::SurfaceKHR,
     loader: khr::surface::Instance,
 }
 
-impl Surface {
-    pub fn new(instance: Arc<Instance>, window: &sdl3::video::Window) -> anyhow::Result<Self> {
-        let entry = &instance.entry;
-        let loader = khr::surface::Instance::new(entry, &instance.instance);
-        let surface = window.vulkan_create_surface(instance.handle())?;
+vulkan_handle!(Surface, surface, vk::SurfaceKHR);
 
-        Ok(Self {
-            surface,
-            loader,
-            instance,
-        })
+impl Surface {
+    pub fn new(
+        entry: &ash::Entry,
+        instance: &instance::Instance,
+        window: &sdl3::video::Window,
+    ) -> anyhow::Result<Self> {
+        let loader = khr::surface::Instance::new(entry, instance.handle());
+        let surface = window.vulkan_create_surface(instance.handle().handle())?;
+
+        Ok(Self { surface, loader })
     }
 
     pub fn destroy(&self) {
