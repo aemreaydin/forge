@@ -1,5 +1,6 @@
 # Forge Checklist
 
+- [ ] Check ultraviolet crate
 - [ ] Use OnceLock for device and instance fns
 - [ ] Rust build.rs for shader building
 - [x] Resizing
@@ -15,7 +16,7 @@
 - [ ] Pipeline handles might be useful
 - [ ] Add pipeline cache
 - [ ] Timeline
-      semaphores - [Vulkan Samples](https://github.com/KhronosGroup/Vulkan-Samples/tree/main/samples/extensions/timeline_semaphore)
+  semaphores - [Vulkan Samples](https://github.com/KhronosGroup/Vulkan-Samples/tree/main/samples/extensions/timeline_semaphore)
 - [ ] Most places have queue family index hard-coded
 - [ ] Learn about color blending and use cases
 - [ ] Create own surface without using any libraries (will need to write platform code)
@@ -26,7 +27,7 @@
 - [ ] Add pipelineCache for graphics pipeline
 - [ ] Check out rust-gpu for shader code
 - [ ] Check out bindless descriptors
-      in [Vulkan Samples](https://github.com/KhronosGroup/Vulkan-Samples/tree/main/samples/extensions/descriptor_indexing)
+  in [Vulkan Samples](https://github.com/KhronosGroup/Vulkan-Samples/tree/main/samples/extensions/descriptor_indexing)
 - [ ] MSAA
 - [ ] Graphics pipeline from JSON or YAML
 - [ ]

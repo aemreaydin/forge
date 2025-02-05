@@ -70,13 +70,13 @@ impl Swapchain {
     }
 
     pub fn recreate(
-        self,
+        &mut self,
         surface: vk::SurfaceKHR,
         render_pass: vk::RenderPass,
         memory_properties: vk::PhysicalDeviceMemoryProperties,
         format: vk::SurfaceFormatKHR,
         extent: vk::Extent2D,
-    ) -> anyhow::Result<Self> {
+    ) -> anyhow::Result<()> {
         self.destroy();
 
         let depth_handles = Self::create_depth_resources(
@@ -98,7 +98,7 @@ impl Swapchain {
             format,
             extent,
         )?;
-        Ok(Self {
+        *self = Self {
             handles,
             depth_handles,
 
@@ -107,9 +107,11 @@ impl Swapchain {
 
             current_image_index: 0,
 
-            device: self.device,
-            loader: self.loader,
-        })
+            device: self.device.clone(),
+            loader: self.loader.clone(),
+        };
+
+        Ok(())
     }
 
     pub fn acquire_next_image(
@@ -156,6 +158,10 @@ impl Swapchain {
 
     pub fn image_view(&self) -> vk::ImageView {
         self.handles.image_views[self.current_image_index as usize]
+    }
+
+    pub fn image_views(&self) -> &[vk::ImageView] {
+        &self.handles.image_views
     }
 
     pub fn depth_image_view(&self) -> vk::ImageView {

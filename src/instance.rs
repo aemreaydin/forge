@@ -124,7 +124,7 @@ impl Instance {
         let mut required_extensions = vec![khr::surface::NAME];
         required_extensions.extend(REQUIRED_INSTANCE_EXTENSIONS);
         let extensions = Self::validate_required_instance_extensions(
-            &entry,
+            entry,
             &required_extensions,
             enable_validation,
         )?;
@@ -150,7 +150,7 @@ impl Instance {
 
         let instance = unsafe { entry.create_instance(&create_info, None)? };
         let debug_utils = if enable_validation {
-            Some(DebugUtils::new(&entry, &instance)?)
+            Some(DebugUtils::new(entry, &instance)?)
         } else {
             None
         };
