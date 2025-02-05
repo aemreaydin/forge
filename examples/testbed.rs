@@ -1,27 +1,69 @@
-use crate::model::load_model;
 use anyhow::{anyhow, Context};
-use ash::vk::Handle;
-use ash::{khr, vk};
+use ash::{
+    khr,
+    vk::{self, ClearValue, Handle},
+};
 use either::Either;
 use forge::{
-    buffer::{Buffer, Vertex},
-    context::VulkanContext,
-    image::Image,
-    shader_object::Shader,
-    surface::Surface,
-    swapchain::Swapchain,
+    renderer::{
+        buffer::{Buffer, Vertex},
+        context::VulkanContext,
+        image::Image,
+        instance::Instance,
+        shader_object::Shader,
+        surface::Surface,
+        swapchain::Swapchain,
+    },
     ui::imgui_sdl3_binding::Sdl3Binding,
 };
 use imgui::sys::{ImDrawIdx, ImDrawVert};
 use imgui::TextureId;
-use nalgebra_glm::Vec3;
+use nalgebra_glm::{Vec2, Vec3, Vec4};
 use sdl3::{event::Event, keyboard::Keycode};
 use std::{mem::offset_of, path::Path};
-use tobj::LoadOptions;
-use vk::ClearValue;
+use tobj::{LoadOptions, Model};
 
-mod model;
+const VALIDATION_ENABLED: bool = cfg!(debug_assertions);
 
+pub fn load_model(model: &Model) -> (Vec<Vertex>, Vec<u32>) {
+    let mesh = &model.mesh;
+
+    let mut vertices = Vec::new();
+    let indices = mesh.indices.clone();
+
+    let positions = mesh.positions.as_slice();
+    let normals = mesh.normals.as_slice();
+    let texcoords = mesh.texcoords.as_slice();
+
+    let vertex_count = positions.len() / 3;
+
+    for i in 0..vertex_count {
+        let position = Vec4::new(
+            positions[i * 3],
+            positions[i * 3 + 1],
+            positions[i * 3 + 2],
+            1.0,
+        );
+        let normal = if !mesh.normals.is_empty() {
+            Vec4::new(normals[i * 3], normals[i * 3 + 1], normals[i * 3 + 2], 1.0)
+        } else {
+            [0.0, 0.0, 0.0, 1.0].into()
+        };
+        let tex_coords = if !mesh.texcoords.is_empty() {
+            Vec2::new(texcoords[i * 3], texcoords[i * 3 + 1])
+        } else {
+            [0.0, 0.0].into()
+        };
+        let vertex = Vertex {
+            position,
+            normal,
+            tex_coords,
+            ..Default::default()
+        };
+        vertices.push(vertex);
+    }
+    (vertices, indices)
+}
 fn get_suitable_format(
     physical_device: vk::PhysicalDevice,
     surface: &Surface,
@@ -414,7 +456,6 @@ fn imgui_render_state(
     vulkan_context: &VulkanContext,
     draw_data: &imgui::DrawData,
     pipeline_layout: vk::PipelineLayout,
-    pipeline: vk::Pipeline,
     cmd: vk::CommandBuffer,
     width: f32,
     height: f32,
@@ -467,7 +508,6 @@ fn render_draw_data(
     vulkan_context: &VulkanContext,
     draw_data: &imgui::DrawData,
     pipeline_layout: vk::PipelineLayout,
-    pipeline: vk::Pipeline,
     descriptor_set: vk::DescriptorSet,
     cmd: vk::CommandBuffer,
 ) -> anyhow::Result<()> {
@@ -533,7 +573,6 @@ fn render_draw_data(
             vulkan_context,
             draw_data,
             pipeline_layout,
-            pipeline,
             cmd,
             width,
             height,
@@ -603,9 +642,7 @@ fn render_draw_data(
                                 y: clip_min[1] as i32,
                             },
                         }];
-                        unsafe {
-                            vulkan_context.device().cmd_set_scissor(cmd, 0, scissors);
-                        }
+                        vulkan_context.device().cmd_set_scissor(cmd, 0, scissors);
 
                         vulkan_context.device().cmd_bind_descriptor_sets(
                             cmd,
@@ -683,7 +720,10 @@ fn main() -> anyhow::Result<()> {
         .build()?;
     let mut event_pump = sdl_context.event_pump()?;
 
-    let vulkan_context = VulkanContext::new(&window)?;
+    let entry = unsafe { ash::Entry::load()? };
+    let instance = Instance::new(&entry, VALIDATION_ENABLED)?;
+    let surface = window.vulkan_create_surface(instance.instance.handle())?;
+    let vulkan_context = VulkanContext::new(entry, instance, surface)?;
 
     let mut imgui = imgui::Context::create();
 
@@ -849,7 +889,7 @@ fn main() -> anyhow::Result<()> {
                 .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
                 .offset(0)
                 .size(size_of::<nalgebra_glm::Mat4>() as u32)];
-            let vert_shader = forge::shader_object::Shader::new(
+            let vert_shader = Shader::new(
                 vulkan_context.instance(),
                 vulkan_context.device(),
                 c"main",
@@ -858,7 +898,7 @@ fn main() -> anyhow::Result<()> {
                 &[descriptor_set_layout],
                 push_constant_ranges,
             )?;
-            let frag_shader = forge::shader_object::Shader::new(
+            let frag_shader = Shader::new(
                 vulkan_context.instance(),
                 vulkan_context.device(),
                 c"main",
@@ -1248,7 +1288,6 @@ fn main() -> anyhow::Result<()> {
                         &vulkan_context,
                         draw_data,
                         imgui_pipeline_layout,
-                        *imgui_pipeline,
                         font_descriptor_set,
                         command_buffer,
                     )?;

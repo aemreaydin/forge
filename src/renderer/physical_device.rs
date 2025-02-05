@@ -1,6 +1,6 @@
-use crate::{instance::Instance, surface::Surface, vulkan_handle};
-use anyhow::anyhow;
-use ash::vk::{self, PhysicalDeviceMemoryProperties};
+use super::{instance::Instance, surface::Surface};
+use anyhow::{anyhow, Context};
+use ash::vk;
 
 fn i8_array_to_string(slice: &[i8]) -> String {
     String::from_utf8_lossy(
@@ -21,25 +21,23 @@ pub struct QueueIndices {
 }
 
 pub struct PhysicalDevice {
-    physical_device: ash::vk::PhysicalDevice,
+    pub physical_device: vk::PhysicalDevice,
 
     pub queue_indices: QueueIndices,
     pub properties: vk::PhysicalDeviceProperties,
     pub features: vk::PhysicalDeviceFeatures,
-    pub memory_properties: PhysicalDeviceMemoryProperties,
+    pub memory_properties: vk::PhysicalDeviceMemoryProperties,
 }
-
-vulkan_handle!(PhysicalDevice, physical_device, ash::vk::PhysicalDevice);
 
 impl PhysicalDevice {
     pub fn new(instance: &Instance, surface: &Surface) -> anyhow::Result<Self> {
-        let physical_devices = unsafe { instance.handle().enumerate_physical_devices()? };
+        let physical_devices = unsafe { instance.instance.enumerate_physical_devices()? };
 
         let mut selected_device: Option<vk::PhysicalDevice> = None;
         let mut fallback_device: Option<vk::PhysicalDevice> = None;
         let mut queue_indices = None;
         for device in &physical_devices {
-            let properties = unsafe { instance.handle().get_physical_device_properties(*device) };
+            let properties = unsafe { instance.instance.get_physical_device_properties(*device) };
             let is_discrete = properties.device_type == vk::PhysicalDeviceType::DISCRETE_GPU;
 
             queue_indices = Some(Self::find_queue_family_indices(instance, surface, device)?);
@@ -53,7 +51,7 @@ impl PhysicalDevice {
 
         let physical_device = match (selected_device, fallback_device) {
             (Some(device), _) => {
-                let props = unsafe { instance.handle().get_physical_device_properties(device) };
+                let props = unsafe { instance.instance.get_physical_device_properties(device) };
                 log::info!(
                     "Using discrete gpu: {}",
                     i8_array_to_string(&props.device_name)
@@ -61,7 +59,7 @@ impl PhysicalDevice {
                 Ok(device)
             }
             (_, Some(fallback)) => {
-                let props = unsafe { instance.handle().get_physical_device_properties(fallback) };
+                let props = unsafe { instance.instance.get_physical_device_properties(fallback) };
                 log::info!(
                     "Using fallback device: {}",
                     i8_array_to_string(&props.device_name)
@@ -76,12 +74,14 @@ impl PhysicalDevice {
                 physical_device,
                 queue_indices: queue_indices.expect("Failed to find queue indices."),
                 properties: instance
-                    .handle()
+                    .instance
                     .get_physical_device_properties(physical_device),
                 features: instance
-                    .handle()
+                    .instance
                     .get_physical_device_features(physical_device),
-                memory_properties: Self::get_memory_properties(instance, physical_device),
+                memory_properties: instance
+                    .instance
+                    .get_physical_device_memory_properties(physical_device),
             })
         }
     }
@@ -93,7 +93,7 @@ impl PhysicalDevice {
     ) -> anyhow::Result<QueueIndices> {
         let queue_props = unsafe {
             instance
-                .handle()
+                .instance
                 .get_physical_device_queue_family_properties(*device)
         };
         let mut graphics_queue = None;
@@ -152,14 +152,20 @@ impl PhysicalDevice {
         })
     }
 
-    fn get_memory_properties(
-        instance: &Instance,
-        device: vk::PhysicalDevice,
-    ) -> PhysicalDeviceMemoryProperties {
-        unsafe {
-            instance
-                .handle()
-                .get_physical_device_memory_properties(device)
-        }
+    pub fn get_required_memory_index(
+        &self,
+        memory_requirements: vk::MemoryRequirements,
+        required_memory_flags: vk::MemoryPropertyFlags,
+    ) -> anyhow::Result<u32> {
+        Ok(self
+            .memory_properties
+            .memory_types
+            .iter()
+            .enumerate()
+            .position(|(ind, mem_type)| {
+                mem_type.property_flags.contains(required_memory_flags)
+                    && (memory_requirements.memory_type_bits & (1 << ind)) != 0
+            })
+            .context("failed to find a suitable memory type index")? as u32)
     }
 }

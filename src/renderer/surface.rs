@@ -1,22 +1,18 @@
-use crate::{instance, vulkan_handle};
+use super::instance;
 use ash::{khr, vk};
 
 pub struct Surface {
-    surface: vk::SurfaceKHR,
+    pub surface: vk::SurfaceKHR,
     loader: khr::surface::Instance,
 }
-
-vulkan_handle!(Surface, surface, vk::SurfaceKHR);
 
 impl Surface {
     pub fn new(
         entry: &ash::Entry,
         instance: &instance::Instance,
-        window: &sdl3::video::Window,
+        surface: vk::SurfaceKHR,
     ) -> anyhow::Result<Self> {
-        let loader = khr::surface::Instance::new(entry, instance.handle());
-        let surface = window.vulkan_create_surface(instance.handle().handle())?;
-
+        let loader = khr::surface::Instance::new(entry, &instance.instance);
         Ok(Self { surface, loader })
     }
 

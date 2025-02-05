@@ -1,4 +1,4 @@
-use crate::{context::VulkanContext, utils::memory::get_required_memory_index};
+use super::context::VulkanContext;
 use ash::vk;
 use bytemuck::{Pod, Zeroable};
 use std::{ffi::c_void, ptr::copy};
@@ -42,13 +42,14 @@ impl Buffer {
             let mem_req = vulkan_context
                 .device()
                 .get_buffer_memory_requirements(buffer);
-            let mem_index =
-                get_required_memory_index(vulkan_context, mem_req, required_memory_flags)?;
+            let mem_index = vulkan_context
+                .physical_device
+                .get_required_memory_index(mem_req, required_memory_flags)?;
             log::trace!("Picking memory index {} for buffer.", mem_index);
 
             let allocate_info = vk::MemoryAllocateInfo::default()
                 .allocation_size(mem_req.size)
-                .memory_type_index(mem_index as u32);
+                .memory_type_index(mem_index);
             let memory = vulkan_context
                 .device()
                 .allocate_memory(&allocate_info, None)?;

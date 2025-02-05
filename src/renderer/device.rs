@@ -1,4 +1,4 @@
-use crate::{instance::Instance, physical_device::PhysicalDevice, vulkan_handle};
+use super::physical_device::PhysicalDevice;
 use anyhow::anyhow;
 use ash::{ext, khr, vk};
 use std::ffi::CStr;
@@ -18,18 +18,14 @@ pub struct DeviceSupport {
 }
 
 pub struct Device {
-    device: ash::Device,
+    pub device: ash::Device,
     pub device_support: DeviceSupport,
 }
 
-vulkan_handle!(Device, device, ash::Device);
-
 impl Device {
-    pub fn new(instance: &Instance, physical_device: &PhysicalDevice) -> anyhow::Result<Self> {
+    pub fn new(instance: &ash::Instance, physical_device: &PhysicalDevice) -> anyhow::Result<Self> {
         let device_extensions = unsafe {
-            instance
-                .handle()
-                .enumerate_device_extension_properties(*physical_device.handle())?
+            instance.enumerate_device_extension_properties(physical_device.physical_device)?
         };
         let required_extensions = Self::get_required_device_extensions(&device_extensions)?;
         let optional_extensions = Self::get_optional_device_extensions(&device_extensions);
@@ -85,11 +81,8 @@ impl Device {
             .queue_create_infos(&queue_create_infos)
             .enabled_extension_names(&extensions)
             .push_next(&mut physical_device_features);
-        let device = unsafe {
-            instance
-                .handle()
-                .create_device(*physical_device.handle(), &create_info, None)?
-        };
+        let device =
+            unsafe { instance.create_device(physical_device.physical_device, &create_info, None)? };
 
         Ok(Self {
             device,

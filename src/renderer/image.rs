@@ -1,4 +1,4 @@
-use crate::{buffer::Buffer, context::VulkanContext};
+use super::{buffer::Buffer, context::VulkanContext};
 use anyhow::Context;
 use ash::vk;
 use bytemuck::Pod;

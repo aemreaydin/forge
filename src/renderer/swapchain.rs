@@ -1,5 +1,5 @@
 use anyhow::Context;
-use ash::{khr, vk, Device, Instance};
+use ash::{khr, vk, Instance};
 
 struct DepthResources {
     image: vk::Image,
@@ -21,14 +21,14 @@ pub struct Swapchain {
 
     current_image_index: u32,
 
-    device: Device,
+    device: ash::Device,
     loader: khr::swapchain::Device,
 }
 
 impl Swapchain {
     pub fn new(
         instance: &Instance,
-        device: &Device,
+        device: &ash::Device,
         surface: vk::SurfaceKHR,
         render_pass: vk::RenderPass,
         memory_properties: vk::PhysicalDeviceMemoryProperties,
@@ -185,7 +185,7 @@ impl Swapchain {
     }
 
     fn create_swapchain(
-        device: &Device,
+        device: &ash::Device,
         loader: &khr::swapchain::Device,
         surface: vk::SurfaceKHR,
         render_pass: vk::RenderPass,
@@ -234,7 +234,7 @@ impl Swapchain {
     }
 
     fn create_image_view(
-        device: &Device,
+        device: &ash::Device,
         image: vk::Image,
         format: vk::Format,
     ) -> anyhow::Result<vk::ImageView> {
@@ -260,7 +260,7 @@ impl Swapchain {
     }
 
     fn create_depth_resources(
-        device: &Device,
+        device: &ash::Device,
         memory_properties: vk::PhysicalDeviceMemoryProperties,
         required_memory_flags: vk::MemoryPropertyFlags,
         extent: vk::Extent3D,
@@ -323,7 +323,7 @@ impl Swapchain {
     }
 
     fn create_framebuffer(
-        device: &Device,
+        device: &ash::Device,
         render_pass: vk::RenderPass,
         image_views: &[vk::ImageView],
         width: u32,

@@ -1,54 +1,49 @@
-use crate::{device, instance, physical_device, surface, utils::handle::Handle};
+use super::{device, instance, physical_device, surface};
 use std::sync::Arc;
-
-const VALIDATION_ENABLED: bool = cfg!(debug_assertions);
 
 pub struct VulkanContext {
     instance: Arc<instance::Instance>,
+    pub surface: Arc<surface::Surface>,
+    pub device: Arc<device::Device>,
 
-    pub surface: surface::Surface,
     pub physical_device: physical_device::PhysicalDevice,
-    pub device: device::Device,
-
     pub graphics_queue: ash::vk::Queue,
     pub compute_queue: ash::vk::Queue,
     pub transfer_queue: ash::vk::Queue,
 }
 
 impl VulkanContext {
-    pub fn new(window: &sdl3::video::Window) -> anyhow::Result<Self> {
-        let entry = unsafe { ash::Entry::load()? };
-        let instance = instance::Instance::new(&entry, VALIDATION_ENABLED)?;
-
-        let surface = surface::Surface::new(&entry, &instance, window)?;
+    pub fn new(
+        entry: ash::Entry,
+        instance: instance::Instance,
+        surface: ash::vk::SurfaceKHR,
+    ) -> anyhow::Result<Self> {
+        let surface = surface::Surface::new(&entry, &instance, surface)?;
 
         let physical_device = physical_device::PhysicalDevice::new(&instance, &surface)?;
-        let device = device::Device::new(&instance, &physical_device)?;
+        let device = device::Device::new(&instance.instance, &physical_device)?;
 
         let graphics_queue = unsafe {
             device
-                .handle()
+                .device
                 .get_device_queue(physical_device.queue_indices.graphics, 0)
         };
         let compute_queue = unsafe {
             device
-                .handle()
+                .device
                 .get_device_queue(physical_device.queue_indices.compute, 0)
         };
         let transfer_queue = unsafe {
             device
-                .handle()
+                .device
                 .get_device_queue(physical_device.queue_indices.transfer, 0)
         };
 
         Ok(Self {
-            instance,
-
-            surface,
-
+            instance: Arc::new(instance),
+            surface: Arc::new(surface),
+            device: Arc::new(device),
             physical_device,
-            device,
-
             graphics_queue,
             compute_queue,
             transfer_queue,
@@ -56,19 +51,19 @@ impl VulkanContext {
     }
 
     pub fn instance(&self) -> &ash::Instance {
-        self.instance.handle()
+        &self.instance.instance
     }
 
     pub fn device(&self) -> &ash::Device {
-        self.device.handle()
+        &self.device.device
     }
 
     pub fn physical_device(&self) -> ash::vk::PhysicalDevice {
-        *self.physical_device.handle()
+        self.physical_device.physical_device
     }
 
     pub fn surface(&self) -> ash::vk::SurfaceKHR {
-        *self.surface.handle()
+        self.surface.surface
     }
 }
 
