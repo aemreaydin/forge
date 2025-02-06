@@ -7,19 +7,23 @@ use either::Either;
 use forge::{
     renderer::{
         buffer::{Buffer, Vertex},
-        context::VulkanContext,
         image::Image,
         instance::Instance,
-        shader_object::Shader,
-        surface::Surface,
+        shader_object::ShaderObject,
         swapchain::Swapchain,
+        vulkan_context::VulkanContext,
     },
-    ui::imgui_sdl3_binding::Sdl3Binding,
+    ui::imgui_sdl3_platform::ImguiSdlPlatform,
 };
-use imgui::sys::{ImDrawIdx, ImDrawVert};
-use imgui::TextureId;
+use imgui::{
+    sys::{ImDrawIdx, ImDrawVert},
+    TextureId,
+};
 use nalgebra_glm::{Vec2, Vec3, Vec4};
-use sdl3::{event::Event, keyboard::Keycode};
+use sdl3::{
+    event::{Event, WindowEvent},
+    keyboard::Keycode,
+};
 use std::{mem::offset_of, path::Path};
 use tobj::{LoadOptions, Model};
 
@@ -63,20 +67,6 @@ pub fn load_model(model: &Model) -> (Vec<Vertex>, Vec<u32>) {
         vertices.push(vertex);
     }
     (vertices, indices)
-}
-fn get_suitable_format(
-    physical_device: vk::PhysicalDevice,
-    surface: &Surface,
-) -> anyhow::Result<vk::SurfaceFormatKHR> {
-    let surface_formats = surface.get_physical_device_surface_formats_khr(physical_device)?;
-    surface_formats
-        .into_iter()
-        .find(|format| {
-            !(format.color_space != vk::ColorSpaceKHR::SRGB_NONLINEAR
-                || format.format != vk::Format::R8G8B8A8_SRGB
-                    && format.format != vk::Format::B8G8R8A8_SRGB)
-        })
-        .context("failed to find a suitable surface format")
 }
 
 fn create_command_pool(
@@ -718,40 +708,24 @@ fn main() -> anyhow::Result<()> {
         .vulkan()
         .resizable()
         .build()?;
-    let mut event_pump = sdl_context.event_pump()?;
 
     let entry = unsafe { ash::Entry::load()? };
     let instance = Instance::new(&entry, VALIDATION_ENABLED)?;
     let surface = window.vulkan_create_surface(instance.instance.handle())?;
-    let vulkan_context = VulkanContext::new(entry, instance, surface)?;
+    let mut vulkan_context = VulkanContext::new(entry, instance, surface)?;
 
     let mut imgui = imgui::Context::create();
 
-    let sdl3_imgui_binding = Sdl3Binding::new(&mut imgui);
+    let sdl3_imgui_binding = ImguiSdlPlatform::new(&mut imgui);
 
     let push_desc_loader =
         khr::push_descriptor::Device::new(vulkan_context.instance(), vulkan_context.device());
-    let format = get_suitable_format(vulkan_context.physical_device(), &vulkan_context.surface)?;
     let render_pass = create_render_pass(
         vulkan_context.device(),
-        format.format,
+        vulkan_context.surface_format().format,
         vk::AttachmentLoadOp::CLEAR,
         vk::ImageLayout::UNDEFINED,
         true,
-    )?;
-
-    let surface_capabilities = vulkan_context
-        .surface
-        .get_physical_device_surface_capabilities_khr(vulkan_context.physical_device())?;
-    let mut extent = surface_capabilities.current_extent;
-    let mut swapchain = Swapchain::new(
-        vulkan_context.instance(),
-        vulkan_context.device(),
-        vulkan_context.surface(),
-        render_pass,
-        vulkan_context.physical_device.memory_properties,
-        format,
-        extent,
     )?;
 
     let (pipeline_layout, descriptor_set_layout) = create_pipeline_layout(vulkan_context.device())?;
@@ -785,7 +759,7 @@ fn main() -> anyhow::Result<()> {
         create_imgui_pipeline_layout(vulkan_context.device(), imgui_set_layout)?;
     let imgui_render_pass = create_render_pass(
         vulkan_context.device(),
-        format.format,
+        vulkan_context.surface_format().format,
         vk::AttachmentLoadOp::LOAD,
         vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
         false,
@@ -828,10 +802,8 @@ fn main() -> anyhow::Result<()> {
         config: Default::default(),
     }]);
     let fonts = imgui.fonts().build_rgba32_texture();
-    let fonts_size = fonts.width * fonts.height * 4 * size_of::<u8>() as u32;
     let fonts_image = Image::new(
         &vulkan_context,
-        fonts_size as u64,
         vk::MemoryPropertyFlags::DEVICE_LOCAL,
         vk::ImageCreateInfo::default()
             .samples(vk::SampleCountFlags::TYPE_1)
@@ -853,7 +825,16 @@ fn main() -> anyhow::Result<()> {
             .layer_count(1)
             .level_count(1),
     )?;
-    fonts_image.copy_to_host(&vulkan_context, font_cmd, fonts.data)?;
+    fonts_image.copy_to_host(
+        &vulkan_context,
+        font_cmd,
+        fonts.data,
+        vk::Extent3D {
+            width: fonts.width,
+            height: fonts.height,
+            depth: 1,
+        },
+    )?;
 
     let font_sampler = create_sampler(&vulkan_context)?;
 
@@ -866,7 +847,8 @@ fn main() -> anyhow::Result<()> {
         vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
     )?;
     imgui.fonts().tex_id = TextureId::new(font_descriptor_set.as_raw() as usize);
-    let imgui_framebuffers = swapchain
+    let imgui_framebuffers = vulkan_context
+        .swapchain()
         .image_views()
         .iter()
         .filter_map(|image_view| {
@@ -875,8 +857,8 @@ fn main() -> anyhow::Result<()> {
                 vulkan_context.device(),
                 imgui_render_pass,
                 views,
-                extent.width,
-                extent.height,
+                vulkan_context.swapchain_extent().width,
+                vulkan_context.swapchain_extent().height,
             )
             .ok()
         })
@@ -889,7 +871,7 @@ fn main() -> anyhow::Result<()> {
                 .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
                 .offset(0)
                 .size(size_of::<nalgebra_glm::Mat4>() as u32)];
-            let vert_shader = Shader::new(
+            let vert_shader = ShaderObject::new(
                 vulkan_context.instance(),
                 vulkan_context.device(),
                 c"main",
@@ -898,7 +880,7 @@ fn main() -> anyhow::Result<()> {
                 &[descriptor_set_layout],
                 push_constant_ranges,
             )?;
-            let frag_shader = Shader::new(
+            let frag_shader = ShaderObject::new(
                 vulkan_context.instance(),
                 vulkan_context.device(),
                 c"main",
@@ -974,6 +956,26 @@ fn main() -> anyhow::Result<()> {
         }
     };
 
+    let depth_image =
+        create_depth_resources(&vulkan_context, vk::MemoryPropertyFlags::DEVICE_LOCAL)?;
+    let framebuffers = vulkan_context
+        .swapchain()
+        .image_views()
+        .iter()
+        .filter_map(|image_view| {
+            let image_views = &[*image_view, depth_image.image_view];
+            create_framebuffer(
+                vulkan_context.device(),
+                render_pass,
+                image_views,
+                vulkan_context.swapchain_extent().width,
+                vulkan_context.swapchain_extent().height,
+            )
+            .ok()
+        })
+        .collect::<Vec<_>>();
+    assert!(framebuffers.len() == vulkan_context.swapchain().image_views().len());
+
     let mut acquire_semaphore = create_semaphore(vulkan_context.device())?;
     let mut present_semaphore = create_semaphore(vulkan_context.device())?;
     let fence = create_fence(vulkan_context.device())?;
@@ -1004,20 +1006,42 @@ fn main() -> anyhow::Result<()> {
     )?;
     let mut show_demo = false;
     let start_time = std::time::Instant::now();
-    while !handle_window_event(&mut event_pump, &mut imgui, &sdl3_imgui_binding) {
+    let mut event_pump = sdl_context.event_pump()?;
+    'main_loop: loop {
+        for event in event_pump.poll_iter() {
+            sdl3_imgui_binding.process_event(&mut imgui, &event);
+            match event {
+                Event::Quit { .. }
+                | Event::KeyDown {
+                    keycode: Some(Keycode::Escape),
+                    ..
+                } => break 'main_loop,
+                Event::Window {
+                    win_event: WindowEvent::Resized(..),
+                    ..
+                } => {
+                    log::info!("Resizing");
+                    vulkan_context.resized()?;
+                }
+                _ => {}
+            }
+        }
         sdl3_imgui_binding.new_frame(&mut imgui, &window)?;
 
-        check_resize(
-            &vulkan_context,
-            format,
-            render_pass,
-            &mut extent,
-            &mut swapchain,
-            &mut acquire_semaphore,
-            &mut present_semaphore,
-        )?;
+        //check_resize(
+        //    &vulkan_context,
+        //    format,
+        //    render_pass,
+        //    &mut extent,
+        //    &mut swapchain,
+        //    &mut acquire_semaphore,
+        //    &mut present_semaphore,
+        //)?;
 
-        swapchain.acquire_next_image(acquire_semaphore, vk::Fence::null())?;
+        let (image_index, _is_suboptimal) = vulkan_context
+            .swapchain()
+            .acquire_next_image(acquire_semaphore, vk::Fence::null())?;
+        let image_index = image_index as usize;
 
         unsafe {
             vulkan_context
@@ -1039,7 +1063,7 @@ fn main() -> anyhow::Result<()> {
                 .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_READ)
                 .old_layout(vk::ImageLayout::UNDEFINED)
                 .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                .image(swapchain.image())
+                .image(vulkan_context.swapchain().image(image_index))
                 .subresource_range(vk::ImageSubresourceRange {
                     aspect_mask: vk::ImageAspectFlags::COLOR,
                     base_mip_level: 0,
@@ -1075,16 +1099,16 @@ fn main() -> anyhow::Result<()> {
 
             let viewports = &[vk::Viewport::default()
                 .x(0.0)
-                .y(swapchain.extent.height as f32)
-                .width(swapchain.extent.width as f32)
-                .height(-(swapchain.extent.height as f32))
+                .y(vulkan_context.swapchain_extent().height as f32)
+                .width(vulkan_context.swapchain_extent().width as f32)
+                .height(-(vulkan_context.swapchain_extent().height as f32))
                 .min_depth(0.0)
                 .max_depth(1.0)];
             vulkan_context
                 .device()
                 .cmd_set_viewport(command_buffer, 0, viewports);
             let scissors = &[vk::Rect2D {
-                extent: swapchain.extent,
+                extent: vulkan_context.swapchain_extent(),
                 offset: vk::Offset2D { x: 0, y: 0 },
             }];
             vulkan_context
@@ -1109,8 +1133,8 @@ fn main() -> anyhow::Result<()> {
             );
             let projection = nalgebra_glm::perspective_fov_rh_zo(
                 f32::to_radians(45.0),
-                extent.width as f32,
-                extent.height as f32,
+                vulkan_context.swapchain_extent().width as f32,
+                vulkan_context.swapchain_extent().height as f32,
                 0.01,
                 10.0,
             );
@@ -1123,13 +1147,13 @@ fn main() -> anyhow::Result<()> {
             match &either_pipeline_or_objects {
                 Either::Left((vert_shader, frag_shader)) => {
                     let color_attachments = &[vk::RenderingAttachmentInfo::default()
-                        .image_view(swapchain.image_view())
+                        .image_view(vulkan_context.swapchain().image_view(image_index))
                         .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
                         .load_op(vk::AttachmentLoadOp::CLEAR)
                         .store_op(vk::AttachmentStoreOp::STORE)
                         .clear_value(clear_values[0])];
                     let depth_attachment = vk::RenderingAttachmentInfo::default()
-                        .image_view(swapchain.depth_image_view())
+                        .image_view(depth_image.image_view)
                         .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
                         .load_op(vk::AttachmentLoadOp::CLEAR)
                         .store_op(vk::AttachmentStoreOp::STORE)
@@ -1137,7 +1161,7 @@ fn main() -> anyhow::Result<()> {
                     let rendering_info = vk::RenderingInfo::default()
                         .render_area(vk::Rect2D {
                             offset: vk::Offset2D { x: 0, y: 0 },
-                            extent,
+                            extent: vulkan_context.swapchain_extent(),
                         })
                         .layer_count(1)
                         .color_attachments(color_attachments)
@@ -1147,8 +1171,8 @@ fn main() -> anyhow::Result<()> {
                         .cmd_begin_rendering(command_buffer, &rendering_info);
                     vert_shader.bind_shader(command_buffer, &[vk::ShaderStageFlags::VERTEX]);
                     frag_shader.bind_shader(command_buffer, &[vk::ShaderStageFlags::FRAGMENT]);
-                    Shader::set_vertex_input(command_buffer, &[], &[]);
-                    Shader::set_dynamic_state(
+                    ShaderObject::set_vertex_input(command_buffer, &[], &[]);
+                    ShaderObject::set_dynamic_state(
                         vulkan_context.device(),
                         command_buffer,
                         viewports,
@@ -1192,9 +1216,9 @@ fn main() -> anyhow::Result<()> {
                     let render_pass_begin = vk::RenderPassBeginInfo::default()
                         .render_pass(render_pass)
                         .clear_values(&clear_values)
-                        .framebuffer(swapchain.framebuffer())
+                        .framebuffer(framebuffers[image_index])
                         .render_area(vk::Rect2D {
-                            extent: swapchain.extent,
+                            extent: vulkan_context.swapchain_extent(),
                             offset: vk::Offset2D { x: 0, y: 0 },
                         });
                     vulkan_context.device().cmd_begin_render_pass(
@@ -1250,9 +1274,9 @@ fn main() -> anyhow::Result<()> {
                     let render_pass_begin = vk::RenderPassBeginInfo::default()
                         .render_pass(imgui_render_pass)
                         .clear_values(&clear_values)
-                        .framebuffer(imgui_framebuffers[swapchain.image_index() as usize])
+                        .framebuffer(imgui_framebuffers[image_index])
                         .render_area(vk::Rect2D {
-                            extent: swapchain.extent,
+                            extent: vulkan_context.swapchain_extent(),
                             offset: vk::Offset2D { x: 0, y: 0 },
                         });
                     vulkan_context.device().cmd_begin_render_pass(
@@ -1308,7 +1332,7 @@ fn main() -> anyhow::Result<()> {
                 .dst_access_mask(vk::AccessFlags::empty())
                 .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
                 .new_layout(vk::ImageLayout::PRESENT_SRC_KHR) // For presenting
-                .image(swapchain.image())
+                .image(vulkan_context.swapchain().image(image_index))
                 .subresource_range(subresource_range)
                 .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                 .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED);
@@ -1328,7 +1352,7 @@ fn main() -> anyhow::Result<()> {
             let cmds = &[command_buffer];
             let waits = &[acquire_semaphore];
             let presents = &[present_semaphore];
-            let images = &[swapchain.image_index()];
+            let image_indices = &[image_index as u32];
             let stage_flags = &[vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
             let submit_info = vk::SubmitInfo::default()
                 .command_buffers(cmds)
@@ -1341,13 +1365,15 @@ fn main() -> anyhow::Result<()> {
                 fence,
             )?;
 
-            let swapchains = &[swapchain.swapchain()];
+            let swapchains = &[vulkan_context.swapchain().swapchain];
             let present_info = vk::PresentInfoKHR::default()
-                .image_indices(images)
+                .image_indices(image_indices)
                 .swapchains(swapchains)
                 .wait_semaphores(presents);
 
-            swapchain.queue_present(vulkan_context.graphics_queue, &present_info)?;
+            vulkan_context
+                .swapchain()
+                .queue_present(vulkan_context.graphics_queue, &present_info)?;
 
             let fences = &[fence];
             vulkan_context
@@ -1397,9 +1423,6 @@ fn main() -> anyhow::Result<()> {
             .device()
             .destroy_command_pool(imgui_command_pool, None);
 
-        // vulkan_context
-        //     .device()
-        //     .destroy_descriptor_set_layout(desc, None);
         vulkan_context.device().destroy_sampler(font_sampler, None);
 
         match either_pipeline_or_objects {
@@ -1427,71 +1450,79 @@ fn main() -> anyhow::Result<()> {
             .device()
             .destroy_pipeline_layout(pipeline_layout, None);
 
-        swapchain.destroy();
         vulkan_context
             .device()
             .destroy_render_pass(render_pass, None);
     }
     Ok(())
 }
+fn create_depth_resources(
+    vulkan_context: &VulkanContext,
+    required_memory_flags: vk::MemoryPropertyFlags,
+) -> anyhow::Result<Image> {
+    let vk::Extent2D { width, height } = vulkan_context.swapchain_extent();
+    let image_create_info = vk::ImageCreateInfo::default()
+        .image_type(vk::ImageType::TYPE_2D)
+        .format(vk::Format::D32_SFLOAT)
+        .extent(vk::Extent3D {
+            width,
+            height,
+            depth: 1,
+        })
+        .mip_levels(1)
+        .tiling(vk::ImageTiling::OPTIMAL)
+        .array_layers(1)
+        .samples(vk::SampleCountFlags::TYPE_1)
+        .usage(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT)
+        .sharing_mode(vk::SharingMode::EXCLUSIVE);
 
+    let image = Image::new(
+        vulkan_context,
+        required_memory_flags,
+        image_create_info,
+        vk::ImageViewType::TYPE_2D,
+        vk::ImageSubresourceRange::default()
+            .aspect_mask(vk::ImageAspectFlags::DEPTH)
+            .layer_count(1)
+            .level_count(1),
+    )?;
+
+    Ok(image)
+}
+
+// TODO: Check this code, doesn't look good
 fn check_resize(
     vulkan_context: &VulkanContext,
     format: vk::SurfaceFormatKHR,
     render_pass: vk::RenderPass,
     extent: &mut vk::Extent2D,
-    swapchain: &mut Swapchain,
+    mut swapchain: Swapchain,
     acquire_semaphore: &mut vk::Semaphore,
     present_semaphore: &mut vk::Semaphore,
 ) -> anyhow::Result<()> {
-    let surface_capabilities = vulkan_context
-        .surface
-        .get_physical_device_surface_capabilities_khr(vulkan_context.physical_device())?;
-    if surface_capabilities.current_extent.width != extent.width
-        || surface_capabilities.current_extent.height != extent.height
-    {
-        unsafe {
-            vulkan_context.device().device_wait_idle()?;
-        }
-        *extent = surface_capabilities.current_extent;
-        swapchain.recreate(
-            vulkan_context.surface(),
-            render_pass,
-            vulkan_context.physical_device.memory_properties,
-            format,
-            *extent,
-        )?;
-
-        unsafe {
-            vulkan_context
-                .device()
-                .destroy_semaphore(*acquire_semaphore, None);
-            vulkan_context
-                .device()
-                .destroy_semaphore(*present_semaphore, None);
-
-            *acquire_semaphore = create_semaphore(vulkan_context.device())?;
-            *present_semaphore = create_semaphore(vulkan_context.device())?;
-        }
-    };
+    //let surface_capabilities = vulkan_context
+    //    .surface
+    //    .get_physical_device_surface_capabilities_khr(vulkan_context.physical_device())?;
+    //if surface_capabilities.current_extent.width != extent.width
+    //    || surface_capabilities.current_extent.height != extent.height
+    //{
+    //    unsafe {
+    //        vulkan_context.device().device_wait_idle()?;
+    //    }
+    //    *extent = surface_capabilities.current_extent;
+    //    swapchain = swapchain.new(vulkan_context.device(), vulkan_context.physical_device())?;
+    //
+    //    unsafe {
+    //        vulkan_context
+    //            .device()
+    //            .destroy_semaphore(*acquire_semaphore, None);
+    //        vulkan_context
+    //            .device()
+    //            .destroy_semaphore(*present_semaphore, None);
+    //
+    //        *acquire_semaphore = create_semaphore(vulkan_context.device())?;
+    //        *present_semaphore = create_semaphore(vulkan_context.device())?;
+    //    }
+    //};
     Ok(())
-}
-
-fn handle_window_event(
-    event_pump: &mut sdl3::EventPump,
-    imgui: &mut imgui::Context,
-    sdl3_imgui_binding: &Sdl3Binding,
-) -> bool {
-    for event in event_pump.poll_iter() {
-        sdl3_imgui_binding.process_event(imgui, &event);
-        match event {
-            Event::Quit { .. }
-            | Event::KeyDown {
-                keycode: Some(Keycode::Escape),
-                ..
-            } => return true,
-            _ => {}
-        }
-    }
-    false
 }

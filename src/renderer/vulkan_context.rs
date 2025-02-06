@@ -1,27 +1,35 @@
-use super::{device, instance, physical_device, surface};
+use super::{device, instance, physical_device, surface, swapchain};
+use ash::vk;
 use std::sync::Arc;
 
 pub struct VulkanContext {
-    instance: Arc<instance::Instance>,
-    pub surface: Arc<surface::Surface>,
+    pub instance: Arc<instance::Instance>,
     pub device: Arc<device::Device>,
 
+    swapchain: swapchain::Swapchain,
     pub physical_device: physical_device::PhysicalDevice,
-    pub graphics_queue: ash::vk::Queue,
-    pub compute_queue: ash::vk::Queue,
-    pub transfer_queue: ash::vk::Queue,
+    pub graphics_queue: vk::Queue,
+    pub compute_queue: vk::Queue,
+    pub transfer_queue: vk::Queue,
 }
 
 impl VulkanContext {
     pub fn new(
         entry: ash::Entry,
         instance: instance::Instance,
-        surface: ash::vk::SurfaceKHR,
+        surface: vk::SurfaceKHR,
     ) -> anyhow::Result<Self> {
-        let surface = surface::Surface::new(&entry, &instance, surface)?;
-
+        let mut surface = surface::Surface::new(&entry, &instance, surface)?;
         let physical_device = physical_device::PhysicalDevice::new(&instance, &surface)?;
+        surface.set_format(physical_device.physical_device)?;
+
         let device = device::Device::new(&instance.instance, &physical_device)?;
+        let swapchain = swapchain::Swapchain::new(
+            &instance.instance,
+            physical_device.physical_device,
+            &device.device,
+            surface,
+        )?;
 
         let graphics_queue = unsafe {
             device
@@ -41,13 +49,19 @@ impl VulkanContext {
 
         Ok(Self {
             instance: Arc::new(instance),
-            surface: Arc::new(surface),
             device: Arc::new(device),
+            swapchain,
             physical_device,
             graphics_queue,
             compute_queue,
             transfer_queue,
         })
+    }
+
+    pub fn resized(&mut self) -> anyhow::Result<()> {
+        self.swapchain
+            .recreate(self.physical_device.physical_device, &self.device.device)?;
+        Ok(())
     }
 
     pub fn instance(&self) -> &ash::Instance {
@@ -58,19 +72,27 @@ impl VulkanContext {
         &self.device.device
     }
 
-    pub fn physical_device(&self) -> ash::vk::PhysicalDevice {
+    pub fn physical_device(&self) -> vk::PhysicalDevice {
         self.physical_device.physical_device
     }
 
-    pub fn surface(&self) -> ash::vk::SurfaceKHR {
-        self.surface.surface
+    pub fn swapchain(&self) -> &swapchain::Swapchain {
+        &self.swapchain
+    }
+
+    pub fn surface_format(&self) -> vk::SurfaceFormatKHR {
+        self.swapchain.surface.format
+    }
+
+    pub fn swapchain_extent(&self) -> vk::Extent2D {
+        self.swapchain.extent
     }
 }
 
 impl Drop for VulkanContext {
     fn drop(&mut self) {
+        self.swapchain.destroy(self.device());
         self.device.destroy();
-        self.surface.destroy();
         self.instance.destroy();
     }
 }

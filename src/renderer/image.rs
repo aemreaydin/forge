@@ -1,4 +1,4 @@
-use super::{buffer::Buffer, context::VulkanContext};
+use super::{buffer::Buffer, vulkan_context::VulkanContext};
 use anyhow::Context;
 use ash::vk;
 use bytemuck::Pod;
@@ -7,15 +7,11 @@ pub struct Image {
     pub image: vk::Image,
     pub image_view: vk::ImageView,
     pub memory: vk::DeviceMemory,
-    pub size: u64,
-
-    extent: vk::Extent3D,
 }
 
 impl Image {
     pub fn new(
         vulkan_context: &VulkanContext,
-        size: u64,
         required_memory_flags: vk::MemoryPropertyFlags,
         image_create_info: vk::ImageCreateInfo,
         view_type: vk::ImageViewType,
@@ -64,9 +60,6 @@ impl Image {
                 image,
                 image_view,
                 memory,
-                size,
-
-                extent: image_create_info.extent,
             })
         }
     }
@@ -76,6 +69,7 @@ impl Image {
         vulkan_context: &VulkanContext,
         cmd: vk::CommandBuffer,
         data: &[T],
+        extent: vk::Extent3D,
     ) -> anyhow::Result<()> {
         unsafe {
             let upload_buffer = Buffer::from_data(
@@ -116,7 +110,7 @@ impl Image {
                         .aspect_mask(vk::ImageAspectFlags::COLOR)
                         .layer_count(1),
                 )
-                .image_extent(self.extent)];
+                .image_extent(extent)];
             vulkan_context.device().cmd_copy_buffer_to_image(
                 cmd,
                 upload_buffer.buffer,
@@ -179,7 +173,6 @@ impl std::fmt::Debug for Image {
         f.debug_struct("Image")
             .field("image", &self.image)
             .field("memory", &self.memory)
-            .field("size", &self.size)
             .finish()
     }
 }

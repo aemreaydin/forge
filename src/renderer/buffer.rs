@@ -1,4 +1,4 @@
-use super::context::VulkanContext;
+use super::vulkan_context::VulkanContext;
 use ash::vk;
 use bytemuck::{Pod, Zeroable};
 use std::{ffi::c_void, ptr::copy};

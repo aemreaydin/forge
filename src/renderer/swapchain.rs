@@ -1,134 +1,81 @@
-use anyhow::Context;
-use ash::{khr, vk, Instance};
+use super::surface::Surface;
+use ash::{
+    khr,
+    vk::{self, Handle},
+    Instance,
+};
+use std::sync::OnceLock;
 
-struct DepthResources {
-    image: vk::Image,
-    image_view: vk::ImageView,
-    memory: vk::DeviceMemory,
-}
+static SWAPCHAIN_DEVICE_FNS: OnceLock<khr::swapchain::Device> = OnceLock::new();
 
-struct SwapchainResources {
-    swapchain: vk::SwapchainKHR,
-    images: Vec<vk::Image>,
-    image_views: Vec<vk::ImageView>,
-    framebuffers: Vec<vk::Framebuffer>,
-}
 pub struct Swapchain {
-    handles: SwapchainResources,
-    depth_handles: DepthResources,
-    pub format: vk::SurfaceFormatKHR,
+    pub swapchain: vk::SwapchainKHR,
+    pub surface: Surface,
+    pub images: Vec<vk::Image>,
+    pub image_views: Vec<vk::ImageView>,
     pub extent: vk::Extent2D,
-
-    current_image_index: u32,
-
-    device: ash::Device,
-    loader: khr::swapchain::Device,
 }
 
+// TODO: OldSwapchain
 impl Swapchain {
     pub fn new(
         instance: &Instance,
+        physical_device: vk::PhysicalDevice,
         device: &ash::Device,
-        surface: vk::SurfaceKHR,
-        render_pass: vk::RenderPass,
-        memory_properties: vk::PhysicalDeviceMemoryProperties,
-        format: vk::SurfaceFormatKHR,
-        extent: vk::Extent2D,
+        surface: Surface,
     ) -> anyhow::Result<Self> {
-        let loader = khr::swapchain::Device::new(instance, device);
-        let depth_handles = Self::create_depth_resources(
-            device,
-            memory_properties,
-            vk::MemoryPropertyFlags::DEVICE_LOCAL,
-            vk::Extent3D {
-                width: extent.width,
-                height: extent.height,
-                depth: 1,
-            },
-        )?;
-        let handles = Self::create_swapchain(
-            device,
-            &loader,
+        SWAPCHAIN_DEVICE_FNS.get_or_init(|| khr::swapchain::Device::new(instance, device));
+
+        let mut swapchain = Self {
+            swapchain: vk::SwapchainKHR::default(),
             surface,
-            render_pass,
-            depth_handles.image_view,
-            format,
-            extent,
-        )?;
-        Ok(Self {
-            handles,
-            depth_handles,
+            images: vec![],
+            image_views: vec![],
+            extent: vk::Extent2D::default(),
+        };
 
-            format,
-            extent,
-
-            current_image_index: 0,
-
-            device: device.clone(),
-            loader,
-        })
+        swapchain.recreate(physical_device, device)?;
+        Ok(swapchain)
     }
 
     pub fn recreate(
         &mut self,
-        surface: vk::SurfaceKHR,
-        render_pass: vk::RenderPass,
-        memory_properties: vk::PhysicalDeviceMemoryProperties,
-        format: vk::SurfaceFormatKHR,
-        extent: vk::Extent2D,
+        physical_device: vk::PhysicalDevice,
+        device: &ash::Device,
     ) -> anyhow::Result<()> {
-        self.destroy();
+        if !self.swapchain.is_null() {
+            self.destroy(device);
+        }
 
-        let depth_handles = Self::create_depth_resources(
-            &self.device,
-            memory_properties,
-            vk::MemoryPropertyFlags::DEVICE_LOCAL,
-            vk::Extent3D {
-                width: extent.width,
-                height: extent.height,
-                depth: 1,
-            },
-        )?;
-        let handles = Self::create_swapchain(
-            &self.device,
-            &self.loader,
-            surface,
-            render_pass,
-            depth_handles.image_view,
-            format,
-            extent,
-        )?;
-        *self = Self {
-            handles,
-            depth_handles,
+        let surface_capabilities = self
+            .surface
+            .get_physical_device_surface_capabilities_khr(physical_device)?;
+        let extent = surface_capabilities.current_extent;
 
-            format,
-            extent,
+        let (swapchain, images, image_views) =
+            Self::create_swapchain_resources(device, &self.surface, extent)?;
 
-            current_image_index: 0,
-
-            device: self.device.clone(),
-            loader: self.loader.clone(),
-        };
-
+        self.extent = extent;
+        self.swapchain = swapchain;
+        self.images = images;
+        self.image_views = image_views;
         Ok(())
     }
 
     pub fn acquire_next_image(
-        &mut self,
+        &self,
         semaphore: vk::Semaphore,
         fence: vk::Fence,
-    ) -> anyhow::Result<bool> {
+    ) -> anyhow::Result<(u32, bool)> {
         unsafe {
-            let (image_index, is_suboptimal) = self.loader.acquire_next_image(
-                self.handles.swapchain,
+            let (image_index, is_suboptimal) = Self::get_device_fns().acquire_next_image(
+                self.swapchain,
                 u64::MAX,
                 semaphore,
                 fence,
             )?;
 
-            self.current_image_index = image_index;
-            Ok(is_suboptimal)
+            Ok((image_index, is_suboptimal))
         }
     }
 
@@ -137,68 +84,42 @@ impl Swapchain {
         queue: vk::Queue,
         present_info: &vk::PresentInfoKHR,
     ) -> anyhow::Result<bool> {
-        unsafe { Ok(self.loader.queue_present(queue, present_info)?) }
+        unsafe { Ok(Self::get_device_fns().queue_present(queue, present_info)?) }
     }
 
-    pub fn swapchain(&self) -> vk::SwapchainKHR {
-        self.handles.swapchain
+    pub fn image(&self, image_index: usize) -> vk::Image {
+        self.images[image_index]
     }
 
-    pub fn image_index(&self) -> u32 {
-        self.current_image_index
-    }
-
-    pub fn framebuffer(&self) -> vk::Framebuffer {
-        self.handles.framebuffers[self.current_image_index as usize]
-    }
-
-    pub fn image(&self) -> vk::Image {
-        self.handles.images[self.current_image_index as usize]
-    }
-
-    pub fn image_view(&self) -> vk::ImageView {
-        self.handles.image_views[self.current_image_index as usize]
+    pub fn image_view(&self, image_index: usize) -> vk::ImageView {
+        self.image_views[image_index]
     }
 
     pub fn image_views(&self) -> &[vk::ImageView] {
-        &self.handles.image_views
+        &self.image_views
     }
 
-    pub fn depth_image_view(&self) -> vk::ImageView {
-        self.depth_handles.image_view
-    }
-
-    pub fn destroy(&self) {
+    pub fn destroy(&self, device: &ash::Device) {
         unsafe {
-            for ind in 0..self.handles.images.len() {
-                self.device
-                    .destroy_image_view(self.handles.image_views[ind], None);
-                self.device
-                    .destroy_framebuffer(self.handles.framebuffers[ind], None);
+            for ind in 0..self.images.len() {
+                device.destroy_image_view(self.image_views[ind], None);
             }
-            self.device.destroy_image(self.depth_handles.image, None);
-            self.device
-                .destroy_image_view(self.depth_handles.image_view, None);
-            self.device.free_memory(self.depth_handles.memory, None);
-            self.loader.destroy_swapchain(self.handles.swapchain, None);
+            Self::get_device_fns().destroy_swapchain(self.swapchain, None);
+            self.surface.destroy();
         }
     }
 
-    fn create_swapchain(
+    fn create_swapchain_resources(
         device: &ash::Device,
-        loader: &khr::swapchain::Device,
-        surface: vk::SurfaceKHR,
-        render_pass: vk::RenderPass,
-        depth_image_view: vk::ImageView,
-        format: vk::SurfaceFormatKHR,
+        surface: &Surface,
         extent: vk::Extent2D,
-    ) -> anyhow::Result<SwapchainResources> {
+    ) -> anyhow::Result<(vk::SwapchainKHR, Vec<vk::Image>, Vec<vk::ImageView>)> {
         unsafe {
             let create_info = vk::SwapchainCreateInfoKHR::default()
-                .surface(surface)
+                .surface(surface.surface)
                 .min_image_count(3)
-                .image_format(format.format)
-                .image_color_space(format.color_space)
+                .image_format(surface.format.format)
+                .image_color_space(surface.format.color_space)
                 .image_array_layers(1)
                 .image_usage(
                     vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_DST,
@@ -208,28 +129,18 @@ impl Swapchain {
                 .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
                 .present_mode(vk::PresentModeKHR::FIFO)
                 .image_extent(extent);
-            let swapchain = loader.create_swapchain(&create_info, None)?;
+            let swapchain = Self::get_device_fns().create_swapchain(&create_info, None)?;
 
-            let images = loader.get_swapchain_images(swapchain)?;
-            let mut image_views = Vec::with_capacity(images.len());
-            let mut framebuffers = Vec::with_capacity(images.len());
-            for (ind, image) in images.iter().enumerate() {
-                image_views.push(Self::create_image_view(device, *image, format.format)?);
-                let views = &[image_views[ind], depth_image_view];
-                framebuffers.push(Self::create_framebuffer(
-                    device,
-                    render_pass,
-                    views,
-                    extent.width,
-                    extent.height,
-                )?);
-            }
-            Ok(SwapchainResources {
-                swapchain,
-                images,
-                image_views,
-                framebuffers,
-            })
+            let images = Self::get_device_fns().get_swapchain_images(swapchain)?;
+            let image_views = images
+                .iter()
+                .filter_map(|image| {
+                    Self::create_image_view(device, *image, surface.format.format).ok()
+                })
+                .collect::<Vec<_>>();
+
+            assert!(images.len() == image_views.len());
+            Ok((swapchain, images, image_views))
         }
     }
 
@@ -259,82 +170,9 @@ impl Swapchain {
         Ok(unsafe { device.create_image_view(&create_info, None)? })
     }
 
-    fn create_depth_resources(
-        device: &ash::Device,
-        memory_properties: vk::PhysicalDeviceMemoryProperties,
-        required_memory_flags: vk::MemoryPropertyFlags,
-        extent: vk::Extent3D,
-    ) -> anyhow::Result<DepthResources> {
-        let image_create_info = vk::ImageCreateInfo::default()
-            .image_type(vk::ImageType::TYPE_2D)
-            .format(vk::Format::D32_SFLOAT)
-            .extent(extent)
-            .mip_levels(1)
-            .tiling(vk::ImageTiling::OPTIMAL)
-            .array_layers(1)
-            .samples(vk::SampleCountFlags::TYPE_1)
-            .usage(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT)
-            .sharing_mode(vk::SharingMode::EXCLUSIVE);
-
-        let image = unsafe { device.create_image(&image_create_info, None)? };
-
-        // TODO: Cleanup
-        let mem_req = unsafe { device.get_image_memory_requirements(image) };
-        let mem_index = memory_properties
-            .memory_types
-            .iter()
-            .enumerate()
-            .position(|(ind, mem_type)| {
-                mem_type.property_flags.contains(required_memory_flags)
-                    && (mem_req.memory_type_bits & (1 << ind)) != 0
-            })
-            .context("failed to find a suitable memory type index")?;
-
-        let allocate_info = vk::MemoryAllocateInfo::default()
-            .allocation_size(mem_req.size)
-            .memory_type_index(mem_index as u32);
-        let memory = unsafe { device.allocate_memory(&allocate_info, None)? };
-        unsafe { device.bind_image_memory(image, memory, 0)? };
-
-        let image_view_create_info = vk::ImageViewCreateInfo::default()
-            .image(image)
-            .view_type(vk::ImageViewType::TYPE_2D)
-            .format(vk::Format::D32_SFLOAT)
-            .components(vk::ComponentMapping {
-                r: vk::ComponentSwizzle::IDENTITY,
-                g: vk::ComponentSwizzle::IDENTITY,
-                b: vk::ComponentSwizzle::IDENTITY,
-                a: vk::ComponentSwizzle::IDENTITY,
-            })
-            .subresource_range(vk::ImageSubresourceRange {
-                aspect_mask: vk::ImageAspectFlags::DEPTH,
-                base_mip_level: 0,
-                level_count: 1,
-                base_array_layer: 0,
-                layer_count: 1,
-            });
-        let image_view = unsafe { device.create_image_view(&image_view_create_info, None)? };
-
-        Ok(DepthResources {
-            image,
-            memory,
-            image_view,
-        })
-    }
-
-    fn create_framebuffer(
-        device: &ash::Device,
-        render_pass: vk::RenderPass,
-        image_views: &[vk::ImageView],
-        width: u32,
-        height: u32,
-    ) -> anyhow::Result<vk::Framebuffer> {
-        let create_info = vk::FramebufferCreateInfo::default()
-            .render_pass(render_pass)
-            .width(width)
-            .height(height)
-            .layers(1)
-            .attachments(image_views);
-        Ok(unsafe { device.create_framebuffer(&create_info, None)? })
+    fn get_device_fns() -> &'static khr::swapchain::Device {
+        SWAPCHAIN_DEVICE_FNS
+            .get()
+            .expect("Swapchain device fns should be initialized by now.")
     }
 }

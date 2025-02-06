@@ -7,11 +7,11 @@ use std::{ffi::CStr, sync::OnceLock};
 
 static SHADER_OBJECT_DEVICE_FNS: OnceLock<ext::shader_object::Device> = OnceLock::new();
 
-pub struct Shader {
+pub struct ShaderObject {
     pub shader: vk::ShaderEXT,
 }
 
-impl Shader {
+impl ShaderObject {
     // TODO: For now we will only support unlinked shaders
     pub fn new(
         instance: &ash::Instance,

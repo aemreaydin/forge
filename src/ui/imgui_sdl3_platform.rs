@@ -5,9 +5,9 @@ use sdl3::{
     mouse::MouseButton,
 };
 
-pub struct Sdl3Binding {}
+pub struct ImguiSdlPlatform {}
 
-impl Sdl3Binding {
+impl ImguiSdlPlatform {
     pub fn new(imgui_ctx: &mut Context) -> Self {
         let io = imgui_ctx.io_mut();
         io.backend_flags
