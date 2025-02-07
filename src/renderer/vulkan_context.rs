@@ -2,6 +2,7 @@ use super::{device, instance, physical_device, surface, swapchain};
 use ash::vk;
 use std::sync::Arc;
 
+#[derive(Clone)]
 pub struct VulkanContext {
     pub instance: Arc<instance::Instance>,
     pub device: Arc<device::Device>,

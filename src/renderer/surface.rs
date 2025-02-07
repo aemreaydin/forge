@@ -6,6 +6,7 @@ use ash::{khr, vk};
 
 static SURFACE_INSTANCE_FNS: OnceLock<khr::surface::Instance> = OnceLock::new();
 
+#[derive(Clone, Copy)]
 pub struct Surface {
     pub surface: vk::SurfaceKHR,
     pub format: vk::SurfaceFormatKHR,

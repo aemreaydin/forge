@@ -13,13 +13,14 @@ fn i8_array_to_string(slice: &[i8]) -> String {
     .to_string()
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct QueueIndices {
     pub graphics: u32,
     pub compute: u32,
     pub transfer: u32,
 }
 
+#[derive(Clone, Copy)]
 pub struct PhysicalDevice {
     pub physical_device: vk::PhysicalDevice,
 

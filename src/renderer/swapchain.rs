@@ -8,6 +8,7 @@ use std::sync::OnceLock;
 
 static SWAPCHAIN_DEVICE_FNS: OnceLock<khr::swapchain::Device> = OnceLock::new();
 
+#[derive(Clone)]
 pub struct Swapchain {
     pub swapchain: vk::SwapchainKHR,
     pub surface: Surface,

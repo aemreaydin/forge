@@ -10,7 +10,6 @@ use forge::{
         image::Image,
         instance::Instance,
         shader_object::ShaderObject,
-        swapchain::Swapchain,
         vulkan_context::VulkanContext,
     },
     ui::imgui_sdl3_platform::ImguiSdlPlatform,
@@ -24,10 +23,43 @@ use sdl3::{
     event::{Event, WindowEvent},
     keyboard::Keycode,
 };
-use std::{mem::offset_of, path::Path};
 use tobj::{LoadOptions, Model};
 
 const VALIDATION_ENABLED: bool = cfg!(debug_assertions);
+
+struct SyncHandles {
+    acquire: vk::Semaphore,
+    present: vk::Semaphore,
+    fence: vk::Fence,
+}
+
+impl SyncHandles {
+    pub fn new(device: &ash::Device, is_fence_signaled: bool) -> anyhow::Result<Self> {
+        let acquire = forge::create_semaphore(device)?;
+        let present = forge::create_semaphore(device)?;
+        let fence = forge::create_fence(
+            device,
+            if is_fence_signaled {
+                vk::FenceCreateFlags::SIGNALED
+            } else {
+                vk::FenceCreateFlags::empty()
+            },
+        )?;
+        Ok(Self {
+            acquire,
+            present,
+            fence,
+        })
+    }
+
+    pub fn destroy(&self, device: &ash::Device) {
+        unsafe {
+            device.destroy_semaphore(self.acquire, None);
+            device.destroy_semaphore(self.present, None);
+            device.destroy_fence(self.fence, None);
+        }
+    }
+}
 
 pub fn load_model(model: &Model) -> (Vec<Vertex>, Vec<u32>) {
     let mesh = &model.mesh;
@@ -69,204 +101,6 @@ pub fn load_model(model: &Model) -> (Vec<Vertex>, Vec<u32>) {
     (vertices, indices)
 }
 
-fn create_command_pool(
-    device: &ash::Device,
-    queue_family_index: u32,
-) -> anyhow::Result<vk::CommandPool> {
-    let create_info = vk::CommandPoolCreateInfo::default()
-        .queue_family_index(queue_family_index)
-        .flags(vk::CommandPoolCreateFlags::TRANSIENT);
-
-    Ok(unsafe { device.create_command_pool(&create_info, None)? })
-}
-
-fn create_semaphore(device: &ash::Device) -> anyhow::Result<vk::Semaphore> {
-    let create_info = vk::SemaphoreCreateInfo::default();
-    Ok(unsafe { device.create_semaphore(&create_info, None)? })
-}
-
-fn create_fence(device: &ash::Device) -> anyhow::Result<vk::Fence> {
-    let create_info = vk::FenceCreateInfo::default();
-    Ok(unsafe { device.create_fence(&create_info, None)? })
-}
-
-fn create_render_pass(
-    device: &ash::Device,
-    format: vk::Format,
-    load_op: vk::AttachmentLoadOp,
-    initial_image_layout: vk::ImageLayout,
-    is_using_depth: bool,
-) -> anyhow::Result<vk::RenderPass> {
-    let color_desc = vk::AttachmentDescription::default()
-        .format(format)
-        .samples(vk::SampleCountFlags::TYPE_1)
-        .load_op(load_op)
-        .store_op(vk::AttachmentStoreOp::STORE)
-        .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
-        .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
-        .initial_layout(initial_image_layout)
-        .final_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
-    let mut descs = vec![color_desc];
-
-    if is_using_depth {
-        descs.push(
-            vk::AttachmentDescription::default()
-                .format(vk::Format::D32_SFLOAT)
-                .samples(vk::SampleCountFlags::TYPE_1)
-                .load_op(vk::AttachmentLoadOp::CLEAR)
-                .store_op(vk::AttachmentStoreOp::DONT_CARE)
-                .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
-                .stencil_store_op(vk::AttachmentStoreOp::STORE)
-                .initial_layout(vk::ImageLayout::UNDEFINED)
-                .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL),
-        );
-    }
-
-    let color_refs = &[vk::AttachmentReference::default()
-        .attachment(0)
-        .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)];
-
-    let mut color_subpass = vk::SubpassDescription::default()
-        .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
-        .color_attachments(color_refs);
-
-    let depth_refs = vk::AttachmentReference::default()
-        .attachment(1)
-        .layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
-    if is_using_depth {
-        color_subpass = color_subpass.depth_stencil_attachment(&depth_refs);
-    }
-    let subpasses = &[color_subpass];
-    let dependencies = &[vk::SubpassDependency::default()
-        .src_subpass(vk::SUBPASS_EXTERNAL)
-        .src_stage_mask(
-            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
-                | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
-        )
-        .dst_stage_mask(
-            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
-                | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
-        )
-        .dst_access_mask(
-            vk::AccessFlags::COLOR_ATTACHMENT_WRITE
-                | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
-        )];
-    let create_info = vk::RenderPassCreateInfo::default()
-        .attachments(&descs)
-        .subpasses(subpasses)
-        .dependencies(dependencies);
-
-    Ok(unsafe { device.create_render_pass(&create_info, None)? })
-}
-
-fn load_shader<P: AsRef<Path>, T: bytemuck::Pod>(path: P) -> anyhow::Result<Vec<T>> {
-    let bytes = std::fs::read(path)?;
-    Ok(bytemuck::try_cast_slice::<u8, T>(&bytes)
-        .expect("Failed to cast shader to u8.")
-        .to_vec())
-}
-
-fn create_shader_module<P: AsRef<Path>>(
-    device: &ash::Device,
-    path: P,
-) -> anyhow::Result<vk::ShaderModule> {
-    let shader_code = load_shader(path)?;
-    let create_info = vk::ShaderModuleCreateInfo::default().code(&shader_code);
-    Ok(unsafe { device.create_shader_module(&create_info, None)? })
-}
-
-// TODO: Add cullmode
-fn create_graphics_pipeline(
-    device: &ash::Device,
-    render_pass: vk::RenderPass,
-    pipeline_layout: vk::PipelineLayout,
-    depth_stencil_state: vk::PipelineDepthStencilStateCreateInfo,
-    vertex_state: vk::PipelineVertexInputStateCreateInfo,
-    vert_module: vk::ShaderModule,
-    frag_module: vk::ShaderModule,
-) -> anyhow::Result<vk::Pipeline> {
-    let name = c"main";
-    let stages = &[
-        vk::PipelineShaderStageCreateInfo::default()
-            .stage(vk::ShaderStageFlags::VERTEX)
-            .module(vert_module)
-            .name(name),
-        vk::PipelineShaderStageCreateInfo::default()
-            .stage(vk::ShaderStageFlags::FRAGMENT)
-            .module(frag_module)
-            .name(name),
-    ];
-    let input_assembly_state = vk::PipelineInputAssemblyStateCreateInfo::default()
-        .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
-    let tesselation_state = vk::PipelineTessellationStateCreateInfo::default();
-    let multisample_state = vk::PipelineMultisampleStateCreateInfo::default()
-        .rasterization_samples(vk::SampleCountFlags::TYPE_1);
-
-    let color_attachment_states = &[vk::PipelineColorBlendAttachmentState::default()
-        .blend_enable(true)
-        .src_color_blend_factor(vk::BlendFactor::SRC_ALPHA)
-        .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
-        .color_blend_op(vk::BlendOp::ADD)
-        .src_alpha_blend_factor(vk::BlendFactor::ONE)
-        .dst_alpha_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
-        .alpha_blend_op(vk::BlendOp::ADD)
-        .color_write_mask(
-            vk::ColorComponentFlags::R
-                | vk::ColorComponentFlags::G
-                | vk::ColorComponentFlags::B
-                | vk::ColorComponentFlags::A,
-        )];
-    let color_blend_state =
-        vk::PipelineColorBlendStateCreateInfo::default().attachments(color_attachment_states);
-
-    let rasterization_state = vk::PipelineRasterizationStateCreateInfo::default()
-        .line_width(1.0)
-        .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
-        .cull_mode(vk::CullModeFlags::NONE);
-
-    let viewport_state = vk::PipelineViewportStateCreateInfo::default()
-        .viewport_count(1)
-        .scissor_count(1);
-
-    let dyn_states = &[vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
-    let dynamic_state = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(dyn_states);
-    let create_info = vk::GraphicsPipelineCreateInfo::default()
-        .stages(stages)
-        .vertex_input_state(&vertex_state)
-        .input_assembly_state(&input_assembly_state)
-        .tessellation_state(&tesselation_state)
-        .multisample_state(&multisample_state)
-        .depth_stencil_state(&depth_stencil_state)
-        .color_blend_state(&color_blend_state)
-        .rasterization_state(&rasterization_state)
-        .viewport_state(&viewport_state)
-        .dynamic_state(&dynamic_state)
-        .render_pass(render_pass)
-        .layout(pipeline_layout)
-        .subpass(0);
-
-    // TODO: Add pipelinecache
-    unsafe {
-        let pipeline_res =
-            device.create_graphics_pipelines(vk::PipelineCache::null(), &[create_info], None);
-
-        let pipeline = match pipeline_res {
-            Ok(pipelines) => pipelines
-                .first()
-                .cloned()
-                .context("failed to get a graphics pipeline"),
-            Err((_, vk_result)) => Err(anyhow!(
-                "failed to create pipeline with error {}",
-                vk_result
-            )),
-        }?;
-
-        device.destroy_shader_module(vert_module, None);
-        device.destroy_shader_module(frag_module, None);
-        Ok(pipeline)
-    }
-}
-
 fn create_imgui_pipeline_layout(
     device: &ash::Device,
     set_layout: vk::DescriptorSetLayout,
@@ -283,134 +117,6 @@ fn create_imgui_pipeline_layout(
     let pipeline_layout = unsafe { device.create_pipeline_layout(&create_info, None)? };
 
     Ok(pipeline_layout)
-}
-
-fn create_pipeline_layout(
-    device: &ash::Device,
-) -> anyhow::Result<(vk::PipelineLayout, vk::DescriptorSetLayout)> {
-    let push_constant_ranges = &[vk::PushConstantRange::default()
-        .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
-        .offset(0)
-        .size(size_of::<nalgebra_glm::Mat4>() as u32)];
-    let bindings = &[vk::DescriptorSetLayoutBinding::default()
-        .binding(0)
-        .descriptor_count(1)
-        .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-        .stage_flags(vk::ShaderStageFlags::VERTEX)];
-    let set_create_info = vk::DescriptorSetLayoutCreateInfo::default()
-        .bindings(bindings)
-        .flags(vk::DescriptorSetLayoutCreateFlags::PUSH_DESCRIPTOR_KHR);
-    let set_layout = unsafe { device.create_descriptor_set_layout(&set_create_info, None)? };
-    let set_layouts = &[set_layout];
-    let create_info = vk::PipelineLayoutCreateInfo::default()
-        .set_layouts(set_layouts)
-        .push_constant_ranges(push_constant_ranges);
-    let pipeline_layout = unsafe { device.create_pipeline_layout(&create_info, None)? };
-
-    Ok((pipeline_layout, set_layout))
-}
-
-fn create_descriptor_set_layout(
-    vulkan_context: &VulkanContext,
-    descriptor_type: vk::DescriptorType,
-    stage_flags: vk::ShaderStageFlags,
-) -> anyhow::Result<vk::DescriptorSetLayout> {
-    let bindings = &[vk::DescriptorSetLayoutBinding::default()
-        .binding(0)
-        .descriptor_count(1)
-        .descriptor_type(descriptor_type)
-        .stage_flags(stage_flags)];
-    let create_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(bindings);
-    Ok(unsafe {
-        vulkan_context
-            .device()
-            .create_descriptor_set_layout(&create_info, None)?
-    })
-}
-
-fn create_sampler(vulkan_context: &VulkanContext) -> anyhow::Result<vk::Sampler> {
-    let create_info = vk::SamplerCreateInfo::default()
-        .mag_filter(vk::Filter::LINEAR)
-        .min_filter(vk::Filter::LINEAR)
-        .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
-        .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
-        .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
-        .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE)
-        .min_lod(-1000.0)
-        .max_lod(1000.0)
-        .unnormalized_coordinates(false)
-        .border_color(vk::BorderColor::FLOAT_TRANSPARENT_BLACK)
-        .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
-        .max_anisotropy(1.0);
-
-    unsafe {
-        vulkan_context
-            .device()
-            .create_sampler(&create_info, None)
-            .context("Failed to create a sampler")
-    }
-}
-
-fn create_texture_descriptor_set(
-    vulkan_context: &VulkanContext,
-    set_layout: vk::DescriptorSetLayout,
-    descriptor_pool: vk::DescriptorPool,
-    sampler: vk::Sampler,
-    image_view: vk::ImageView,
-    image_layout: vk::ImageLayout,
-) -> anyhow::Result<vk::DescriptorSet> {
-    let set_layouts = &[set_layout];
-
-    let allocate_info = vk::DescriptorSetAllocateInfo::default()
-        .descriptor_pool(descriptor_pool)
-        .set_layouts(set_layouts);
-
-    unsafe {
-        let descriptor_set = vulkan_context
-            .device()
-            .allocate_descriptor_sets(&allocate_info)?
-            .first()
-            .cloned()
-            .context("Failed to allocate a descriptor set for texture")?;
-
-        let descriptor_image_info = &[vk::DescriptorImageInfo::default()
-            .sampler(sampler)
-            .image_view(image_view)
-            .image_layout(image_layout)];
-
-        let write_descs = &[vk::WriteDescriptorSet::default()
-            .dst_set(descriptor_set)
-            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-            .image_info(descriptor_image_info)];
-        vulkan_context
-            .device()
-            .update_descriptor_sets(write_descs, &[]);
-
-        vulkan_context
-            .device()
-            .destroy_descriptor_set_layout(set_layout, None);
-        Ok(descriptor_set)
-    }
-}
-
-fn create_descriptor_pool(
-    vulkan_context: &VulkanContext,
-    pool_sizes: &[vk::DescriptorPoolSize],
-) -> anyhow::Result<vk::DescriptorPool> {
-    let create_info = vk::DescriptorPoolCreateInfo::default()
-        .pool_sizes(pool_sizes)
-        .flags(vk::DescriptorPoolCreateFlags::FREE_DESCRIPTOR_SET)
-        .max_sets(
-            pool_sizes
-                .iter()
-                .fold(0, |acc, pool_size| acc + pool_size.descriptor_count),
-        );
-    let descriptor_pool = unsafe {
-        vulkan_context
-            .device()
-            .create_descriptor_pool(&create_info, None)?
-    };
-    Ok(descriptor_pool)
 }
 
 pub fn normalize_mesh(vertices: &mut [Vertex]) {
@@ -674,22 +380,6 @@ fn render_draw_data(
     Ok(())
 }
 
-fn create_framebuffer(
-    device: &ash::Device,
-    render_pass: vk::RenderPass,
-    image_views: &[vk::ImageView],
-    width: u32,
-    height: u32,
-) -> anyhow::Result<vk::Framebuffer> {
-    let create_info = vk::FramebufferCreateInfo::default()
-        .render_pass(render_pass)
-        .width(width)
-        .height(height)
-        .layers(1)
-        .attachments(image_views);
-    Ok(unsafe { device.create_framebuffer(&create_info, None)? })
-}
-
 fn main() -> anyhow::Result<()> {
     let mesh_path = std::env::args()
         .nth(1)
@@ -720,7 +410,7 @@ fn main() -> anyhow::Result<()> {
 
     let push_desc_loader =
         khr::push_descriptor::Device::new(vulkan_context.instance(), vulkan_context.device());
-    let render_pass = create_render_pass(
+    let render_pass = forge::create_render_pass(
         vulkan_context.device(),
         vulkan_context.surface_format().format,
         vk::AttachmentLoadOp::CLEAR,
@@ -728,18 +418,37 @@ fn main() -> anyhow::Result<()> {
         true,
     )?;
 
-    let (pipeline_layout, descriptor_set_layout) = create_pipeline_layout(vulkan_context.device())?;
-    let descriptor_pool = create_descriptor_pool(
-        &vulkan_context,
+    let push_constant_ranges = &[vk::PushConstantRange::default()
+        .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
+        .offset(0)
+        .size(size_of::<nalgebra_glm::Mat4>() as u32)];
+    let bindings = &[vk::DescriptorSetLayoutBinding::default()
+        .binding(0)
+        .descriptor_count(1)
+        .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+        .stage_flags(vk::ShaderStageFlags::VERTEX)];
+    let descriptor_set_layout = forge::create_descriptor_set_layout(
+        vulkan_context.device(),
+        bindings,
+        vk::DescriptorSetLayoutCreateFlags::PUSH_DESCRIPTOR_KHR,
+    )?;
+    let pipeline_layout = forge::create_pipeline_layout(
+        vulkan_context.device(),
+        push_constant_ranges,
+        &[descriptor_set_layout],
+    )?;
+    let descriptor_pool = forge::create_descriptor_pool(
+        vulkan_context.device(),
         &[vk::DescriptorPoolSize {
             ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
             descriptor_count: 100,
         }],
     )?;
 
-    let command_pool = create_command_pool(
+    let command_pool = forge::create_command_pool(
         vulkan_context.device(),
         vulkan_context.physical_device.queue_indices.graphics,
+        vk::CommandPoolCreateFlags::TRANSIENT,
     )?;
     let command_buffer_allocate_info = vk::CommandBufferAllocateInfo::default()
         .command_buffer_count(1)
@@ -750,14 +459,19 @@ fn main() -> anyhow::Result<()> {
             .allocate_command_buffers(&command_buffer_allocate_info)?
     };
 
-    let imgui_set_layout = create_descriptor_set_layout(
-        &vulkan_context,
-        vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-        vk::ShaderStageFlags::FRAGMENT | vk::ShaderStageFlags::VERTEX,
+    let bindings = &[vk::DescriptorSetLayoutBinding::default()
+        .stage_flags(vk::ShaderStageFlags::FRAGMENT | vk::ShaderStageFlags::VERTEX)
+        .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+        .descriptor_count(1)
+        .binding(0)];
+    let imgui_set_layout = forge::create_descriptor_set_layout(
+        vulkan_context.device(),
+        bindings,
+        vk::DescriptorSetLayoutCreateFlags::empty(),
     )?;
     let imgui_pipeline_layout =
         create_imgui_pipeline_layout(vulkan_context.device(), imgui_set_layout)?;
-    let imgui_render_pass = create_render_pass(
+    let imgui_render_pass = forge::create_render_pass(
         vulkan_context.device(),
         vulkan_context.surface_format().format,
         vk::AttachmentLoadOp::LOAD,
@@ -765,9 +479,10 @@ fn main() -> anyhow::Result<()> {
         false,
     )?;
     // TODO: The image copy operation should use transfer and graphics queues.
-    let imgui_command_pool = create_command_pool(
+    let imgui_command_pool = forge::create_command_pool(
         vulkan_context.device(),
         vulkan_context.physical_device.queue_indices.graphics,
+        vk::CommandPoolCreateFlags::TRANSIENT,
     )?;
     let imgui_command_buffer_allocate_info = vk::CommandBufferAllocateInfo::default()
         .command_buffer_count(1)
@@ -836,11 +551,11 @@ fn main() -> anyhow::Result<()> {
         },
     )?;
 
-    let font_sampler = create_sampler(&vulkan_context)?;
+    let font_sampler = forge::create_sampler(vulkan_context.device())?;
 
-    let font_descriptor_set = create_texture_descriptor_set(
-        &vulkan_context,
-        imgui_set_layout,
+    let font_descriptor_set = forge::create_texture_descriptor_set(
+        vulkan_context.device(),
+        &[imgui_set_layout],
         descriptor_pool,
         font_sampler,
         fonts_image.image_view,
@@ -853,7 +568,7 @@ fn main() -> anyhow::Result<()> {
         .iter()
         .filter_map(|image_view| {
             let views = &[*image_view];
-            create_framebuffer(
+            forge::create_framebuffer(
                 vulkan_context.device(),
                 imgui_render_pass,
                 views,
@@ -876,7 +591,7 @@ fn main() -> anyhow::Result<()> {
                 vulkan_context.device(),
                 c"main",
                 vk::ShaderStageFlags::VERTEX,
-                &load_shader::<_, u8>("shaders/triangle.vert.spv")?,
+                &forge::load_shader::<_, u8>("shaders/triangle.vert.spv")?,
                 &[descriptor_set_layout],
                 push_constant_ranges,
             )?;
@@ -885,7 +600,7 @@ fn main() -> anyhow::Result<()> {
                 vulkan_context.device(),
                 c"main",
                 vk::ShaderStageFlags::FRAGMENT,
-                &load_shader::<_, u8>("shaders/triangle.frag.spv")?,
+                &forge::load_shader::<_, u8>("shaders/triangle.frag.spv")?,
                 &[descriptor_set_layout],
                 push_constant_ranges,
             )?;
@@ -895,14 +610,14 @@ fn main() -> anyhow::Result<()> {
         false => {
             log::info!("Using Graphics Pipeline");
             let vert_module =
-                create_shader_module(vulkan_context.device(), "shaders/triangle.vert.spv")?;
+                forge::create_shader_module(vulkan_context.device(), "shaders/triangle.vert.spv")?;
             let frag_module =
-                create_shader_module(vulkan_context.device(), "shaders/triangle.frag.spv")?;
+                forge::create_shader_module(vulkan_context.device(), "shaders/triangle.frag.spv")?;
 
             let imgui_vert_module =
-                create_shader_module(vulkan_context.device(), "shaders/imgui.vert.spv")?;
+                forge::create_shader_module(vulkan_context.device(), "shaders/imgui.vert.spv")?;
             let imgui_frag_module =
-                create_shader_module(vulkan_context.device(), "shaders/imgui.frag.spv")?;
+                forge::create_shader_module(vulkan_context.device(), "shaders/imgui.frag.spv")?;
 
             let binding_descs = &[vk::VertexInputBindingDescription::default()
                 .stride(size_of::<ImDrawVert>() as u32)
@@ -912,17 +627,17 @@ fn main() -> anyhow::Result<()> {
                     .location(0)
                     .binding(binding_descs[0].binding)
                     .format(vk::Format::R32G32_SFLOAT)
-                    .offset(offset_of!(ImDrawVert, pos) as u32),
+                    .offset(std::mem::offset_of!(ImDrawVert, pos) as u32),
                 vk::VertexInputAttributeDescription::default()
                     .location(1)
                     .binding(binding_descs[0].binding)
                     .format(vk::Format::R32G32_SFLOAT)
-                    .offset(offset_of!(ImDrawVert, uv) as u32),
+                    .offset(std::mem::offset_of!(ImDrawVert, uv) as u32),
                 vk::VertexInputAttributeDescription::default()
                     .location(2)
                     .binding(binding_descs[0].binding)
                     .format(vk::Format::R8G8B8A8_UNORM)
-                    .offset(offset_of!(ImDrawVert, col) as u32),
+                    .offset(std::mem::offset_of!(ImDrawVert, col) as u32),
             ];
             let depth_stencil_state = vk::PipelineDepthStencilStateCreateInfo::default()
                 .depth_test_enable(true)
@@ -930,7 +645,7 @@ fn main() -> anyhow::Result<()> {
                 .depth_write_enable(true)
                 .min_depth_bounds(0.0)
                 .max_depth_bounds(1.0);
-            let imgui_pipeline = create_graphics_pipeline(
+            let imgui_pipeline = forge::create_graphics_pipeline(
                 vulkan_context.device(),
                 imgui_render_pass,
                 imgui_pipeline_layout,
@@ -942,7 +657,7 @@ fn main() -> anyhow::Result<()> {
                 imgui_frag_module,
             )?;
             Either::Right((
-                create_graphics_pipeline(
+                forge::create_graphics_pipeline(
                     vulkan_context.device(),
                     render_pass,
                     pipeline_layout,
@@ -964,7 +679,7 @@ fn main() -> anyhow::Result<()> {
         .iter()
         .filter_map(|image_view| {
             let image_views = &[*image_view, depth_image.image_view];
-            create_framebuffer(
+            forge::create_framebuffer(
                 vulkan_context.device(),
                 render_pass,
                 image_views,
@@ -976,9 +691,7 @@ fn main() -> anyhow::Result<()> {
         .collect::<Vec<_>>();
     assert!(framebuffers.len() == vulkan_context.swapchain().image_views().len());
 
-    let mut acquire_semaphore = create_semaphore(vulkan_context.device())?;
-    let mut present_semaphore = create_semaphore(vulkan_context.device())?;
-    let fence = create_fence(vulkan_context.device())?;
+    let mut sync_handles = SyncHandles::new(vulkan_context.device(), false)?;
 
     let (models, _materials) = tobj::load_obj(
         mesh_path,
@@ -1022,6 +735,7 @@ fn main() -> anyhow::Result<()> {
                 } => {
                     log::info!("Resizing");
                     vulkan_context.resized()?;
+                    sync_handles = recreate_sync_handles(vulkan_context.device(), sync_handles)?;
                 }
                 _ => {}
             }
@@ -1040,7 +754,7 @@ fn main() -> anyhow::Result<()> {
 
         let (image_index, _is_suboptimal) = vulkan_context
             .swapchain()
-            .acquire_next_image(acquire_semaphore, vk::Fence::null())?;
+            .acquire_next_image(sync_handles.acquire, vk::Fence::null())?;
         let image_index = image_index as usize;
 
         unsafe {
@@ -1350,8 +1064,8 @@ fn main() -> anyhow::Result<()> {
             vulkan_context.device().end_command_buffer(command_buffer)?;
 
             let cmds = &[command_buffer];
-            let waits = &[acquire_semaphore];
-            let presents = &[present_semaphore];
+            let waits = &[sync_handles.acquire];
+            let presents = &[sync_handles.present];
             let image_indices = &[image_index as u32];
             let stage_flags = &[vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
             let submit_info = vk::SubmitInfo::default()
@@ -1362,7 +1076,7 @@ fn main() -> anyhow::Result<()> {
             vulkan_context.device().queue_submit(
                 vulkan_context.graphics_queue,
                 &[submit_info],
-                fence,
+                sync_handles.fence,
             )?;
 
             let swapchains = &[vulkan_context.swapchain().swapchain];
@@ -1375,7 +1089,7 @@ fn main() -> anyhow::Result<()> {
                 .swapchain()
                 .queue_present(vulkan_context.graphics_queue, &present_info)?;
 
-            let fences = &[fence];
+            let fences = &[sync_handles.fence];
             vulkan_context
                 .device()
                 .wait_for_fences(fences, true, u64::MAX)?;
@@ -1386,6 +1100,7 @@ fn main() -> anyhow::Result<()> {
     unsafe {
         vulkan_context.device().device_wait_idle()?;
 
+        sync_handles.destroy(vulkan_context.device());
         fonts_image.destroy(vulkan_context.device());
 
         vulkan_context
@@ -1401,14 +1116,6 @@ fn main() -> anyhow::Result<()> {
         vulkan_context
             .device()
             .destroy_buffer(index_buffer.buffer, None);
-
-        vulkan_context.device().destroy_fence(fence, None);
-        vulkan_context
-            .device()
-            .destroy_semaphore(acquire_semaphore, None);
-        vulkan_context
-            .device()
-            .destroy_semaphore(present_semaphore, None);
 
         vulkan_context
             .device()
@@ -1446,6 +1153,9 @@ fn main() -> anyhow::Result<()> {
         vulkan_context
             .device()
             .destroy_descriptor_set_layout(descriptor_set_layout, None);
+        vulkan_context
+            .device()
+            .destroy_descriptor_set_layout(imgui_set_layout, None);
         vulkan_context
             .device()
             .destroy_pipeline_layout(pipeline_layout, None);
@@ -1490,39 +1200,47 @@ fn create_depth_resources(
     Ok(image)
 }
 
-// TODO: Check this code, doesn't look good
-fn check_resize(
-    vulkan_context: &VulkanContext,
-    format: vk::SurfaceFormatKHR,
-    render_pass: vk::RenderPass,
-    extent: &mut vk::Extent2D,
-    mut swapchain: Swapchain,
-    acquire_semaphore: &mut vk::Semaphore,
-    present_semaphore: &mut vk::Semaphore,
-) -> anyhow::Result<()> {
-    //let surface_capabilities = vulkan_context
-    //    .surface
-    //    .get_physical_device_surface_capabilities_khr(vulkan_context.physical_device())?;
-    //if surface_capabilities.current_extent.width != extent.width
-    //    || surface_capabilities.current_extent.height != extent.height
-    //{
-    //    unsafe {
-    //        vulkan_context.device().device_wait_idle()?;
-    //    }
-    //    *extent = surface_capabilities.current_extent;
-    //    swapchain = swapchain.new(vulkan_context.device(), vulkan_context.physical_device())?;
-    //
-    //    unsafe {
-    //        vulkan_context
-    //            .device()
-    //            .destroy_semaphore(*acquire_semaphore, None);
-    //        vulkan_context
-    //            .device()
-    //            .destroy_semaphore(*present_semaphore, None);
-    //
-    //        *acquire_semaphore = create_semaphore(vulkan_context.device())?;
-    //        *present_semaphore = create_semaphore(vulkan_context.device())?;
-    //    }
-    //};
-    Ok(())
+fn recreate_sync_handles(
+    device: &ash::Device,
+    sync_handles: SyncHandles,
+) -> anyhow::Result<SyncHandles> {
+    sync_handles.destroy(device);
+    SyncHandles::new(device, false)
 }
+
+// TODO: Check this code, doesn't look good
+//fn check_resize(
+//    vulkan_context: &VulkanContext,
+//    format: vk::SurfaceFormatKHR,
+//    render_pass: vk::RenderPass,
+//    extent: &mut vk::Extent2D,
+//    mut swapchain: Swapchain,
+//    acquire_semaphore: &mut vk::Semaphore,
+//    present_semaphore: &mut vk::Semaphore,
+//) -> anyhow::Result<()> {
+//let surface_capabilities = vulkan_context
+//    .surface
+//    .get_physical_device_surface_capabilities_khr(vulkan_context.physical_device())?;
+//if surface_capabilities.current_extent.width != extent.width
+//    || surface_capabilities.current_extent.height != extent.height
+//{
+//    unsafe {
+//        vulkan_context.device().device_wait_idle()?;
+//    }
+//    *extent = surface_capabilities.current_extent;
+//    swapchain = swapchain.new(vulkan_context.device(), vulkan_context.physical_device())?;
+//
+//    unsafe {
+//        vulkan_context
+//            .device()
+//            .destroy_semaphore(*acquire_semaphore, None);
+//        vulkan_context
+//            .device()
+//            .destroy_semaphore(*present_semaphore, None);
+//
+//        *acquire_semaphore = create_semaphore(vulkan_context.device())?;
+//        *present_semaphore = create_semaphore(vulkan_context.device())?;
+//    }
+//};
+//    Ok(())
+//}

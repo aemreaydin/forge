@@ -1,12 +1,12 @@
-use imgui::Context;
-use sdl3::event::Event;
-
 use super::imgui_sdl3_platform::ImguiSdlPlatform;
 use crate::renderer::{buffer::Buffer, vulkan_context::VulkanContext, Renderer};
+use ash::vk;
+use imgui::Context;
+use sdl3::event::Event;
 use std::sync::Arc;
 
 pub struct ImguiVulkanRenderer {
-    vulkan_context: Arc<VulkanContext>,
+    vulkan_context: VulkanContext,
     sdl_platform: ImguiSdlPlatform,
     imgui_context: Context,
 
@@ -15,10 +15,18 @@ pub struct ImguiVulkanRenderer {
 
     vtx_buffer: Option<Buffer>,
     idx_buffer: Option<Buffer>,
+    // Resources
+    //render_pass: vk::RenderPass,
+    //pipeline_layout: vk::PipelineLayout,
+    //pipeline: vk::Pipeline,
+    //framebuffers: Vec<vk::Framebuffer>,
+    //descriptor_set_layout: vk::DescriptorSetLayout,
+    //font_texture: vk::DescriptorSet,
+    //font_sampler: vk::Sampler,
 }
 
 impl ImguiVulkanRenderer {
-    pub fn new(vulkan_context: Arc<VulkanContext>, sdl_platform: ImguiSdlPlatform) -> Self {
+    pub fn new(vulkan_context: VulkanContext, sdl_platform: ImguiSdlPlatform) -> Self {
         let imgui_context = Context::create();
         Self {
             vulkan_context,
