@@ -2,7 +2,7 @@ use super::imgui_sdl3_platform::ImguiSdlPlatform;
 use crate::{
     device::Device,
     image::Image,
-    physical_device::{self, PhysicalDevice},
+    physical_device::PhysicalDevice,
     renderer::{buffer::Buffer, vulkan_context::VulkanContext},
     vulkan_context,
 };
@@ -140,9 +140,10 @@ impl ImguiVulkanRenderer {
 
         let allocate_info = vk::CommandBufferAllocateInfo::default()
             .command_buffer_count(1)
-            .command_pool(device.graphics_command_pool);
-        let temp_cmd = unsafe { device.device.allocate_command_buffers(&allocate_info)? };
+            .command_pool(*vulkan_context.graphics_command_pool);
+        let temp_cmd = unsafe { Ok(device.device.allocate_command_buffers(&allocate_info)?) };
 
+        let temp_cmd = device.allocate_command_buffers(1)?;
         imgui_context
             .fonts()
             .add_font(&[imgui::FontSource::TtfData {
@@ -152,17 +153,15 @@ impl ImguiVulkanRenderer {
             }]);
         let fonts = imgui_context.fonts().build_rgba32_texture();
         let font_image = Self::upload_font_image(
-            &physical_device,
-            &device,
-            *vulkan_context.graphics_queue,
+            &ctx,
             &fonts,
             *temp_cmd
                 .first()
                 .expect("failed to find a command buffer to use."),
         )?;
-        let font_sampler = crate::create_sampler(&device.device)?;
+        let font_sampler = crate::create_sampler(ctx.device())?;
         let font_descriptor_set = crate::create_texture_descriptor_set(
-            &device.device,
+            ctx.device(),
             &[descriptor_set_layout],
             descriptor_pool,
             font_sampler,
@@ -170,21 +169,15 @@ impl ImguiVulkanRenderer {
             vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
         )?;
         unsafe {
-            device
-                .device
-                .free_command_buffers(device.graphics_command_pool, &temp_cmd);
+            ctx.device()
+                .free_command_buffers(*ctx.graphics_command_pool, &temp_cmd);
         }
 
-        let allocate_info = vk::CommandBufferAllocateInfo::default()
-            .command_buffer_count(vulkan_context.swapchain().num_frames_in_flight)
-            .command_pool(device.graphics_command_pool);
-        let command_buffers = unsafe { device.device.allocate_command_buffers(&allocate_info)? };
+        let command_buffers = ctx.allocate_command_buffers(ctx.swapchain().num_frames_in_flight)?;
         let current_command_buffer = command_buffers[0];
 
         Ok(Self {
-            physical_device,
-            device,
-
+            vulkan_context: vulkan_context.clone(),
             sdl_platform,
             imgui_context,
 
@@ -210,50 +203,41 @@ impl ImguiVulkanRenderer {
     }
 
     pub fn destroy(&self) {
+        let ctx = &*self.vulkan_context.borrow();
         unsafe {
-            self.device.device.destroy_sampler(self.font_sampler, None);
-            self.device
-                .device
+            ctx.device().destroy_sampler(self.font_sampler, None);
+            ctx.device()
                 .destroy_descriptor_set_layout(self.descriptor_set_layout, None);
-            self.device
-                .device
+            ctx.device()
                 .free_descriptor_sets(self.descriptor_pool, &[self.font_descriptor_set]);
-            self.device
-                .device
+            ctx.device()
                 .destroy_descriptor_pool(self.descriptor_pool, None);
-            self.device
-                .device
-                .destroy_render_pass(self.render_pass, None);
-            self.device.device.destroy_pipeline(self.pipeline, None);
-            self.device
-                .device
+            ctx.device().destroy_render_pass(self.render_pass, None);
+            ctx.device().destroy_pipeline(self.pipeline, None);
+            ctx.device()
                 .destroy_pipeline_layout(self.pipeline_layout, None);
-            self.font_image.destroy(&self.device.device);
+            self.font_image.destroy(ctx.device());
             if let Some(vtx_buffer) = &self.vtx_buffer {
-                vtx_buffer.destroy(&self.device.device);
+                vtx_buffer.destroy(ctx.device());
             }
             if let Some(idx_buffer) = &self.idx_buffer {
-                idx_buffer.destroy(&self.device.device);
+                idx_buffer.destroy(ctx.device());
             }
             self.framebuffers.iter().for_each(|framebuffer| {
-                self.device.device.destroy_framebuffer(*framebuffer, None);
+                ctx.device().destroy_framebuffer(*framebuffer, None);
             });
-            self.device
-                .device
-                .free_command_buffers(self.device.graphics_command_pool, &self.command_buffers);
+            ctx.device()
+                .free_command_buffers(*ctx.graphics_command_pool, &self.command_buffers);
         }
     }
 
     fn upload_font_image(
-        physical_device: &PhysicalDevice,
-        device: &Device,
-        queue: vk::Queue,
+        ctx: &VulkanContext,
         fonts: &FontAtlasTexture,
         cmd: vk::CommandBuffer,
     ) -> anyhow::Result<Image> {
         let image = Image::new(
-            physical_device,
-            &&&&&&&device.device,
+            ctx,
             vk::MemoryPropertyFlags::DEVICE_LOCAL,
             vk::ImageCreateInfo::default()
                 .samples(vk::SampleCountFlags::TYPE_1)
@@ -276,9 +260,7 @@ impl ImguiVulkanRenderer {
                 .level_count(1),
         )?;
         image.copy_to_host(
-            physical_device,
-            &device.device,
-            queue,
+            ctx,
             cmd,
             fonts.data,
             vk::Extent3D {
@@ -295,9 +277,74 @@ impl ImguiVulkanRenderer {
             .process_event(&mut self.imgui_context, event);
     }
 
+    fn update_buffers(&mut self, draw_data: &DrawData) -> anyhow::Result<()> {
+        // Most likely same values as the previous frame, no need to recreate buffers
+        if self.prev_vtx_count == draw_data.total_vtx_count
+            && self.prev_idx_count != draw_data.total_idx_count
+        {
+            return Ok(());
+        }
+        self.prev_idx_count = draw_data.total_idx_count;
+        self.prev_vtx_count = draw_data.total_vtx_count;
+
+        let vtx_size = crate::align_buffer_size(
+            draw_data.total_vtx_count as u64 * size_of::<ImDrawVert>() as u64,
+            256,
+        );
+        let idx_size = crate::align_buffer_size(
+            draw_data.total_idx_count as u64 * size_of::<ImDrawIdx>() as u64,
+            256,
+        );
+
+        let vtx_buffer = Buffer::new(
+            &self.ctx,
+            vtx_size,
+            vk::MemoryPropertyFlags::HOST_VISIBLE,
+            vk::BufferUsageFlags::VERTEX_BUFFER,
+        )?;
+        let vtx_ptr = vtx_buffer.map_memory(&self.ctx)?;
+
+        let idx_buffer = Buffer::new(
+            &self.ctx,
+            idx_size,
+            vk::MemoryPropertyFlags::HOST_VISIBLE,
+            vk::BufferUsageFlags::INDEX_BUFFER,
+        )?;
+        let idx_ptr = idx_buffer.map_memory(&self.ctx)?;
+
+        let mut vtx_vec = Vec::with_capacity(draw_data.total_vtx_count as usize);
+        let mut idx_vec = Vec::with_capacity(draw_data.total_idx_count as usize);
+        draw_data.draw_lists().for_each(|draw_list| {
+            vtx_vec.extend_from_slice(draw_list.vtx_buffer());
+            idx_vec.extend_from_slice(draw_list.idx_buffer());
+        });
+        unsafe {
+            (vtx_vec.as_ptr() as *mut std::ffi::c_void)
+                .copy_to_nonoverlapping(vtx_ptr, size_of::<ImDrawVert>() * vtx_vec.len());
+            (idx_vec.as_ptr() as *mut std::ffi::c_void)
+                .copy_to_nonoverlapping(idx_ptr, size_of::<ImDrawIdx>() * idx_vec.len());
+        }
+
+        let ranges = &[
+            vk::MappedMemoryRange::default()
+                .memory(vtx_buffer.memory)
+                .size(vk::WHOLE_SIZE),
+            vk::MappedMemoryRange::default()
+                .memory(idx_buffer.memory)
+                .size(vk::WHOLE_SIZE),
+        ];
+        unsafe {
+            self.ctx.device().flush_mapped_memory_ranges(ranges)?;
+            idx_buffer.unmap_memory(self.ctx.device());
+            vtx_buffer.unmap_memory(self.ctx.device());
+        }
+        self.idx_buffer = Some(idx_buffer);
+        self.vtx_buffer = Some(vtx_buffer);
+        Ok(())
+    }
+
     pub fn start_frame(
         &mut self,
-        extent: vk::Extent2D,
         window: &sdl3::video::Window,
         image_index: usize,
     ) -> anyhow::Result<()> {
@@ -317,7 +364,7 @@ impl ImguiVulkanRenderer {
             .clear_values(clear_values)
             .framebuffer(self.framebuffers[image_index])
             .render_area(vk::Rect2D {
-                extent,
+                extent: self.ctx.swapchain_extent(),
                 offset: vk::Offset2D { x: 0, y: 0 },
             });
 
@@ -338,8 +385,8 @@ impl ImguiVulkanRenderer {
         //    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED);
 
         unsafe {
-            self.device
-                .device
+            self.ctx
+                .device()
                 .begin_command_buffer(self.current_command_buffer, &begin_info)?;
             //self.ctx.device().cmd_pipeline_barrier(
             //    self.current_command_buffer,
@@ -350,12 +397,12 @@ impl ImguiVulkanRenderer {
             //    &[],
             //    &[to_transfer_barrier],
             //);
-            self.device.device.cmd_begin_render_pass(
+            self.ctx.device().cmd_begin_render_pass(
                 self.current_command_buffer,
                 &render_pass_begin,
                 vk::SubpassContents::INLINE,
             );
-            self.device.device.cmd_bind_pipeline(
+            self.ctx.device().cmd_bind_pipeline(
                 self.current_command_buffer,
                 vk::PipelineBindPoint::GRAPHICS,
                 self.pipeline,
@@ -365,7 +412,7 @@ impl ImguiVulkanRenderer {
         Ok(())
     }
 
-    pub fn end_frame(&self, image: vk::Image) -> anyhow::Result<()> {
+    pub fn end_frame(&self, image_index: usize) -> anyhow::Result<()> {
         let subresource_range = vk::ImageSubresourceRange {
             aspect_mask: vk::ImageAspectFlags::COLOR,
             base_mip_level: 0,
@@ -378,15 +425,15 @@ impl ImguiVulkanRenderer {
             .dst_access_mask(vk::AccessFlags::empty())
             .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
             .new_layout(vk::ImageLayout::PRESENT_SRC_KHR) // For presenting
-            .image(image)
+            .image(self.ctx.swapchain().image(image_index))
             .subresource_range(subresource_range)
             .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED);
         unsafe {
-            self.device
-                .device
+            self.ctx
+                .device()
                 .cmd_end_render_pass(self.current_command_buffer);
-            self.device.device.cmd_pipeline_barrier(
+            self.ctx.device().cmd_pipeline_barrier(
                 self.current_command_buffer,
                 vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
                 vk::PipelineStageFlags::BOTTOM_OF_PIPE,
@@ -396,8 +443,8 @@ impl ImguiVulkanRenderer {
                 &[to_present_barrier],
             );
             Ok(self
-                .device
-                .device
+                .ctx
+                .device()
                 .end_command_buffer(self.current_command_buffer)?)
         }
     }
@@ -405,88 +452,24 @@ impl ImguiVulkanRenderer {
     pub fn draw(&mut self, mut build: impl FnMut(&mut Ui)) -> anyhow::Result<()> {
         let ui = self.imgui_context.new_frame();
         build(ui);
+        // TODO: Didn't know how to get around the second mutable occurs @self.update_buffers
+        // So I'm calling the imgui syscalls directly
+        let x = 5;
+        let draw_data = unsafe {
+            imgui::sys::igRender();
+            &*(imgui::sys::igGetDrawData() as *mut DrawData)
+        };
 
-        let draw_data = self.imgui_context.render();
         let width = draw_data.display_size[0] * draw_data.framebuffer_scale[0];
         let height = draw_data.display_size[1] * draw_data.framebuffer_scale[1];
-
-        if width <= 0.0
-            || height <= 0.0
-            || draw_data.total_vtx_count == 0
-            || draw_data.total_idx_count == 0
-        {
+        if width <= 0.0 || height <= 0.0 {
+            return Ok(());
+        }
+        if draw_data.total_vtx_count == 0 || draw_data.total_idx_count != 0 {
             return Ok(());
         }
 
-        // Most likely same values as the previous frame, no need to recreate buffers
-        if self.prev_vtx_count != draw_data.total_vtx_count
-            && self.prev_idx_count != draw_data.total_idx_count
-        {
-            let vtx_size = crate::align_buffer_size(
-                draw_data.total_vtx_count as u64 * size_of::<ImDrawVert>() as u64,
-                256,
-            );
-            let idx_size = crate::align_buffer_size(
-                draw_data.total_idx_count as u64 * size_of::<ImDrawIdx>() as u64,
-                256,
-            );
-
-            let vtx_buffer = Buffer::new(
-                &self.physical_device,
-                &self.device.device,
-                vtx_size,
-                vk::MemoryPropertyFlags::HOST_VISIBLE,
-                vk::BufferUsageFlags::VERTEX_BUFFER,
-            )?;
-            let vtx_ptr = vtx_buffer.map_memory(&self.device.device)?;
-
-            let idx_buffer = Buffer::new(
-                &self.physical_device,
-                &self.device.device,
-                idx_size,
-                vk::MemoryPropertyFlags::HOST_VISIBLE,
-                vk::BufferUsageFlags::INDEX_BUFFER,
-            )?;
-            let idx_ptr = idx_buffer.map_memory(&self.device.device)?;
-
-            let mut vtx_vec = Vec::with_capacity(draw_data.total_vtx_count as usize);
-            let mut idx_vec = Vec::with_capacity(draw_data.total_idx_count as usize);
-            draw_data.draw_lists().for_each(|draw_list| {
-                vtx_vec.extend_from_slice(draw_list.vtx_buffer());
-                idx_vec.extend_from_slice(draw_list.idx_buffer());
-            });
-            unsafe {
-                (vtx_vec.as_ptr() as *mut std::ffi::c_void)
-                    .copy_to_nonoverlapping(vtx_ptr, size_of::<ImDrawVert>() * vtx_vec.len());
-                (idx_vec.as_ptr() as *mut std::ffi::c_void)
-                    .copy_to_nonoverlapping(idx_ptr, size_of::<ImDrawIdx>() * idx_vec.len());
-            }
-
-            let ranges = &[
-                vk::MappedMemoryRange::default()
-                    .memory(vtx_buffer.memory)
-                    .size(vk::WHOLE_SIZE),
-                vk::MappedMemoryRange::default()
-                    .memory(idx_buffer.memory)
-                    .size(vk::WHOLE_SIZE),
-            ];
-            unsafe {
-                self.device.device.flush_mapped_memory_ranges(ranges)?;
-                idx_buffer.unmap_memory(&self.device.device);
-                vtx_buffer.unmap_memory(&self.device.device);
-            }
-
-            if let Some(idx_buffer) = &self.idx_buffer {
-                idx_buffer.destroy(&self.device.device);
-            }
-            if let Some(vtx_buffer) = &self.vtx_buffer {
-                vtx_buffer.destroy(&self.device.device);
-            }
-            self.prev_idx_count = draw_data.total_idx_count;
-            self.prev_vtx_count = draw_data.total_vtx_count;
-            self.idx_buffer = Some(idx_buffer);
-            self.vtx_buffer = Some(vtx_buffer);
-        }
+        self.update_buffers(draw_data)?;
 
         let viewports = &[vk::Viewport::default()
             .x(0.0)
@@ -510,17 +493,17 @@ impl ImguiVulkanRenderer {
             .expect("Failed to cast imgui translate slice");
 
         unsafe {
-            self.device
-                .device
+            self.ctx
+                .device()
                 .cmd_set_viewport(self.current_command_buffer, 0, viewports);
-            self.device.device.cmd_push_constants(
+            self.ctx.device().cmd_push_constants(
                 self.current_command_buffer,
                 self.pipeline_layout,
                 vk::ShaderStageFlags::VERTEX,
                 0,
                 scale_bytes,
             );
-            self.device.device.cmd_push_constants(
+            self.ctx.device().cmd_push_constants(
                 self.current_command_buffer,
                 self.pipeline_layout,
                 vk::ShaderStageFlags::VERTEX,
@@ -528,9 +511,12 @@ impl ImguiVulkanRenderer {
                 translate_bytes,
             );
             if let Some(idx_buffer) = &self.idx_buffer {
-                self.device.device.cmd_bind_index_buffer(
+                self.ctx.device().cmd_bind_index_buffer(
                     self.current_command_buffer,
-                    idx_buffer.buffer,
+                    self.idx_buffer
+                        .as_ref()
+                        .expect("Index buffer must be initialized by now")
+                        .buffer,
                     0,
                     if size_of::<ImDrawIdx>() == 2 {
                         vk::IndexType::UINT16
@@ -540,10 +526,14 @@ impl ImguiVulkanRenderer {
                 );
             }
             if let Some(vtx_buffer) = &self.vtx_buffer {
-                self.device.device.cmd_bind_vertex_buffers(
+                self.ctx.device().cmd_bind_vertex_buffers(
                     self.current_command_buffer,
                     0,
-                    &[vtx_buffer.buffer],
+                    &[self
+                        .vtx_buffer
+                        .as_ref()
+                        .expect("Vertex buffer must be initialized by now")
+                        .buffer],
                     &[0],
                 );
             }
@@ -594,13 +584,13 @@ impl ImguiVulkanRenderer {
                                     y: clip_min[1] as i32,
                                 },
                             }];
-                            self.device.device.cmd_set_scissor(
+                            self.ctx.device().cmd_set_scissor(
                                 self.current_command_buffer,
                                 0,
                                 scissors,
                             );
 
-                            self.device.device.cmd_bind_descriptor_sets(
+                            self.ctx.device().cmd_bind_descriptor_sets(
                                 self.current_command_buffer,
                                 vk::PipelineBindPoint::GRAPHICS,
                                 self.pipeline_layout,
@@ -608,7 +598,7 @@ impl ImguiVulkanRenderer {
                                 &[self.font_descriptor_set],
                                 &[],
                             );
-                            self.device.device.cmd_draw_indexed(
+                            self.ctx.device().cmd_draw_indexed(
                                 self.current_command_buffer,
                                 count as u32,
                                 1,
@@ -632,8 +622,8 @@ impl ImguiVulkanRenderer {
                 },
                 offset: vk::Offset2D { x: 0, y: 0 },
             }];
-            self.device
-                .device
+            self.ctx
+                .device()
                 .cmd_set_scissor(self.current_command_buffer, 0, scissors);
         }
         Ok(())

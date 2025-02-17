@@ -22,15 +22,19 @@ pub enum FrameState {
 pub trait Renderer {
     fn start_frame(&self) -> anyhow::Result<()>;
     fn end_frame(&self) -> anyhow::Result<()>;
-    fn draw(&self) -> anyhow::Result<()>;
+    fn draw(&mut self) -> anyhow::Result<()>;
 
     fn resized(&mut self, dims: &[u32; 2]) -> anyhow::Result<bool>;
 
-    fn update(&self) -> anyhow::Result<()> {
+    fn update(&mut self) -> anyhow::Result<()> {
         self.start_frame()?;
         self.draw()?;
         self.end_frame()
     }
+}
+
+pub(crate) fn align_buffer_size(size: vk::DeviceSize, alignment: vk::DeviceSize) -> vk::DeviceSize {
+    (size + alignment - 1) & !(alignment - 1)
 }
 
 pub fn create_command_pool(

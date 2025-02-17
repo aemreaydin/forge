@@ -20,6 +20,8 @@ pub struct DeviceSupport {
 pub struct Device {
     pub device: ash::Device,
     pub device_support: DeviceSupport,
+
+    pub graphics_command_pool: vk::CommandPool,
 }
 
 impl Device {
@@ -84,14 +86,25 @@ impl Device {
         let device =
             unsafe { instance.create_device(physical_device.physical_device, &create_info, None)? };
 
+        let graphics_command_pool = crate::create_command_pool(
+            &device,
+            physical_device.queue_indices.graphics,
+            vk::CommandPoolCreateFlags::TRANSIENT
+                | vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
+        )?;
+
         Ok(Self {
             device,
             device_support,
+
+            graphics_command_pool,
         })
     }
 
     pub fn destroy(&self) {
         unsafe {
+            self.device
+                .destroy_command_pool(self.graphics_command_pool, None);
             self.device.destroy_device(None);
         }
     }

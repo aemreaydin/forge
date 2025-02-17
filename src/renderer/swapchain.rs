@@ -1,12 +1,13 @@
-use super::surface::Surface;
+use super::{physical_device::PhysicalDevice, surface::Surface};
 use ash::{
     khr,
     vk::{self, Handle},
     Instance,
 };
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 static SWAPCHAIN_DEVICE_FNS: OnceLock<khr::swapchain::Device> = OnceLock::new();
+const OPTIMAL_FRAMES_IN_FLIGHT: u32 = 3;
 
 #[derive(Clone)]
 pub struct Swapchain {
@@ -15,52 +16,57 @@ pub struct Swapchain {
     pub images: Vec<vk::Image>,
     pub image_views: Vec<vk::ImageView>,
     pub extent: vk::Extent2D,
+
+    pub num_frames_in_flight: u32,
 }
 
 // TODO: OldSwapchain
 impl Swapchain {
     pub fn new(
         instance: &Instance,
-        physical_device: vk::PhysicalDevice,
+        physical_device: &PhysicalDevice,
         device: &ash::Device,
         surface: Surface,
-    ) -> anyhow::Result<Self> {
+    ) -> anyhow::Result<Arc<Self>> {
         SWAPCHAIN_DEVICE_FNS.get_or_init(|| khr::swapchain::Device::new(instance, device));
 
-        let mut swapchain = Self {
+        let swapchain = Arc::new(Self {
             swapchain: vk::SwapchainKHR::default(),
             surface,
             images: vec![],
             image_views: vec![],
             extent: vk::Extent2D::default(),
-        };
-
-        swapchain.recreate(physical_device, device)?;
+            num_frames_in_flight: OPTIMAL_FRAMES_IN_FLIGHT,
+        });
+        let swapchain = swapchain.recreate(physical_device, device)?;
         Ok(swapchain)
     }
 
     pub fn recreate(
-        &mut self,
-        physical_device: vk::PhysicalDevice,
+        self: &Arc<Self>,
+        physical_device: &PhysicalDevice,
         device: &ash::Device,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Arc<Self>> {
         if !self.swapchain.is_null() {
             self.destroy(device);
         }
 
         let surface_capabilities = self
             .surface
-            .get_physical_device_surface_capabilities_khr(physical_device)?;
+            .get_physical_device_surface_capabilities_khr(physical_device.physical_device)?;
         let extent = surface_capabilities.current_extent;
 
-        let (swapchain, images, image_views) =
-            Self::create_swapchain_resources(device, &self.surface, extent)?;
+        let (swapchain, images, image_views, num_frames_in_flight) =
+            Self::create_swapchain_resources(device, physical_device, &self.surface, extent)?;
 
-        self.extent = extent;
-        self.swapchain = swapchain;
-        self.images = images;
-        self.image_views = image_views;
-        Ok(())
+        Ok(Arc::new(Self {
+            swapchain,
+            images,
+            image_views,
+            extent,
+            num_frames_in_flight,
+            surface: self.surface,
+        }))
     }
 
     pub fn acquire_next_image(
@@ -112,13 +118,24 @@ impl Swapchain {
 
     fn create_swapchain_resources(
         device: &ash::Device,
+        physical_device: &PhysicalDevice,
         surface: &Surface,
         extent: vk::Extent2D,
-    ) -> anyhow::Result<(vk::SwapchainKHR, Vec<vk::Image>, Vec<vk::ImageView>)> {
+    ) -> anyhow::Result<(vk::SwapchainKHR, Vec<vk::Image>, Vec<vk::ImageView>, u32)> {
         unsafe {
+            let surface_capabilities = physical_device.surface_capabilities;
+            let image_count = u32::max(
+                surface_capabilities.min_image_count,
+                u32::min(
+                    surface_capabilities.max_image_count,
+                    OPTIMAL_FRAMES_IN_FLIGHT,
+                ),
+            );
+            log::info!("Using {} frames in flight", image_count);
+
             let create_info = vk::SwapchainCreateInfoKHR::default()
                 .surface(surface.surface)
-                .min_image_count(3)
+                .min_image_count(image_count)
                 .image_format(surface.format.format)
                 .image_color_space(surface.format.color_space)
                 .image_array_layers(1)
@@ -141,7 +158,7 @@ impl Swapchain {
                 .collect::<Vec<_>>();
 
             assert!(images.len() == image_views.len());
-            Ok((swapchain, images, image_views))
+            Ok((swapchain, images, image_views, image_count))
         }
     }
 

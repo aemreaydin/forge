@@ -7,11 +7,11 @@ pub struct VulkanContext {
     pub instance: Arc<instance::Instance>,
     pub device: Arc<device::Device>,
 
-    swapchain: swapchain::Swapchain,
-    pub physical_device: physical_device::PhysicalDevice,
-    pub graphics_queue: vk::Queue,
-    pub compute_queue: vk::Queue,
-    pub transfer_queue: vk::Queue,
+    swapchain: Arc<swapchain::Swapchain>,
+    pub physical_device: Arc<physical_device::PhysicalDevice>,
+    pub graphics_queue: Arc<vk::Queue>,
+    pub compute_queue: Arc<vk::Queue>,
+    pub transfer_queue: Arc<vk::Queue>,
 }
 
 impl VulkanContext {
@@ -27,7 +27,7 @@ impl VulkanContext {
         let device = device::Device::new(&instance.instance, &physical_device)?;
         let swapchain = swapchain::Swapchain::new(
             &instance.instance,
-            physical_device.physical_device,
+            &physical_device,
             &device.device,
             surface,
         )?;
@@ -52,16 +52,17 @@ impl VulkanContext {
             instance: Arc::new(instance),
             device: Arc::new(device),
             swapchain,
-            physical_device,
-            graphics_queue,
-            compute_queue,
-            transfer_queue,
+            physical_device: Arc::new(physical_device),
+            graphics_queue: Arc::new(graphics_queue),
+            compute_queue: Arc::new(compute_queue),
+            transfer_queue: Arc::new(transfer_queue),
         })
     }
 
     pub fn resized(&mut self) -> anyhow::Result<()> {
-        self.swapchain
-            .recreate(self.physical_device.physical_device, &self.device.device)?;
+        self.swapchain = self
+            .swapchain
+            .recreate(&self.physical_device, self.device())?;
         Ok(())
     }
 

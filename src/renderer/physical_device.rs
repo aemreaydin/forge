@@ -28,6 +28,8 @@ pub struct PhysicalDevice {
     pub properties: vk::PhysicalDeviceProperties,
     pub features: vk::PhysicalDeviceFeatures,
     pub memory_properties: vk::PhysicalDeviceMemoryProperties,
+
+    pub surface_capabilities: vk::SurfaceCapabilitiesKHR,
 }
 
 impl PhysicalDevice {
@@ -83,6 +85,8 @@ impl PhysicalDevice {
                 memory_properties: instance
                     .instance
                     .get_physical_device_memory_properties(physical_device),
+                surface_capabilities: surface
+                    .get_physical_device_surface_capabilities_khr(physical_device)?,
             })
         }
     }
