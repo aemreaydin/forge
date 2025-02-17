@@ -2,7 +2,7 @@ use super::imgui_sdl3_platform::ImguiSdlPlatform;
 use crate::{
     device::Device,
     image::Image,
-    physical_device::{PhysicalDevice},
+    physical_device::PhysicalDevice,
     renderer::{buffer::Buffer, vulkan_context::VulkanContext},
 };
 use ash::vk;
@@ -216,7 +216,8 @@ impl ImguiVulkanRenderer {
                 .destroy_descriptor_set_layout(self.descriptor_set_layout, None);
             self.device
                 .device
-                .free_descriptor_sets(self.descriptor_pool, &[self.font_descriptor_set]);
+                .free_descriptor_sets(self.descriptor_pool, &[self.font_descriptor_set])
+                .expect("Failed to free descriptor sets");
             self.device
                 .device
                 .destroy_descriptor_pool(self.descriptor_pool, None);
@@ -252,7 +253,7 @@ impl ImguiVulkanRenderer {
     ) -> anyhow::Result<Image> {
         let image = Image::new(
             physical_device,
-            &&&&&&&device.device,
+            &device.device,
             vk::MemoryPropertyFlags::DEVICE_LOCAL,
             vk::ImageCreateInfo::default()
                 .samples(vk::SampleCountFlags::TYPE_1)

@@ -14,7 +14,6 @@ use forge::{
     },
     ui::imgui_renderer::ImguiVulkanRenderer,
 };
-use imgui::sys::ImDrawVert;
 use nalgebra_glm::{Vec2, Vec3, Vec4};
 use sdl3::{
     event::{Event, WindowEvent},
@@ -96,24 +95,6 @@ pub fn load_model(model: &Model) -> (Vec<Vertex>, Vec<u32>) {
         vertices.push(vertex);
     }
     (vertices, indices)
-}
-
-fn create_imgui_pipeline_layout(
-    device: &ash::Device,
-    set_layout: vk::DescriptorSetLayout,
-) -> anyhow::Result<vk::PipelineLayout> {
-    let push_constant_ranges = &[vk::PushConstantRange::default()
-        .stage_flags(vk::ShaderStageFlags::VERTEX)
-        .offset(0)
-        // Scale and Offset for 2D Imgui
-        .size(2 * size_of::<nalgebra_glm::Vec2>() as u32)];
-    let set_layouts = &[set_layout];
-    let create_info = vk::PipelineLayoutCreateInfo::default()
-        .set_layouts(set_layouts)
-        .push_constant_ranges(push_constant_ranges);
-    let pipeline_layout = unsafe { device.create_pipeline_layout(&create_info, None)? };
-
-    Ok(pipeline_layout)
 }
 
 pub fn normalize_mesh(vertices: &mut [Vertex]) {
@@ -257,26 +238,6 @@ fn main() -> anyhow::Result<()> {
             let frag_module =
                 forge::create_shader_module(vulkan_context.device(), "shaders/triangle.frag.spv")?;
 
-            let binding_descs = &[vk::VertexInputBindingDescription::default()
-                .stride(size_of::<ImDrawVert>() as u32)
-                .input_rate(vk::VertexInputRate::VERTEX)];
-            let attribute_descs = &[
-                vk::VertexInputAttributeDescription::default()
-                    .location(0)
-                    .binding(binding_descs[0].binding)
-                    .format(vk::Format::R32G32_SFLOAT)
-                    .offset(std::mem::offset_of!(ImDrawVert, pos) as u32),
-                vk::VertexInputAttributeDescription::default()
-                    .location(1)
-                    .binding(binding_descs[0].binding)
-                    .format(vk::Format::R32G32_SFLOAT)
-                    .offset(std::mem::offset_of!(ImDrawVert, uv) as u32),
-                vk::VertexInputAttributeDescription::default()
-                    .location(2)
-                    .binding(binding_descs[0].binding)
-                    .format(vk::Format::R8G8B8A8_UNORM)
-                    .offset(std::mem::offset_of!(ImDrawVert, col) as u32),
-            ];
             let depth_stencil_state = vk::PipelineDepthStencilStateCreateInfo::default()
                 .depth_test_enable(true)
                 .depth_compare_op(vk::CompareOp::LESS)
