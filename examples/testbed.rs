@@ -14,19 +14,11 @@ use forge::{
     },
     ui::imgui_renderer::ImguiVulkanRenderer,
 };
-use imgui::{
-    sys::{ImDrawIdx, ImDrawVert},
-    TextureId,
-};
+use imgui::sys::ImDrawVert;
 use nalgebra_glm::{Vec2, Vec3, Vec4};
 use sdl3::{
     event::{Event, WindowEvent},
     keyboard::Keycode,
-};
-use std::{
-    cell::RefCell,
-    rc::Rc,
-    sync::{Arc, Mutex},
 };
 use tobj::{LoadOptions, Model};
 

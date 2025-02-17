@@ -2,14 +2,13 @@ use super::imgui_sdl3_platform::ImguiSdlPlatform;
 use crate::{
     device::Device,
     image::Image,
-    physical_device::{self, PhysicalDevice},
+    physical_device::{PhysicalDevice},
     renderer::{buffer::Buffer, vulkan_context::VulkanContext},
-    vulkan_context,
 };
 use ash::vk;
 use imgui::{
     sys::{ImDrawIdx, ImDrawVert},
-    Context, DrawData, FontAtlasTexture, Ui,
+    Context, FontAtlasTexture, Ui,
 };
 use sdl3::event::Event;
 use std::sync::Arc;

@@ -1,4 +1,4 @@
-use super::{buffer::Buffer, physical_device::PhysicalDevice, vulkan_context::VulkanContext};
+use super::{buffer::Buffer, physical_device::PhysicalDevice};
 use anyhow::Context;
 use ash::vk;
 use bytemuck::Pod;
