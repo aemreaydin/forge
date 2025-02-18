@@ -1,3 +1,4 @@
+mod model;
 use anyhow::Context;
 use ash::{
     khr,
@@ -14,6 +15,7 @@ use forge::{
     },
     ui::imgui_renderer::ImguiVulkanRenderer,
 };
+use model::{Model as ForgeModel, Transform};
 use nalgebra_glm::{Vec2, Vec3, Vec4};
 use sdl3::{
     event::{Event, WindowEvent},
@@ -144,6 +146,7 @@ fn main() -> anyhow::Result<()> {
         .vulkan()
         .resizable()
         .build()?;
+    video_subsystem.text_input().start(&window);
 
     let entry = unsafe { ash::Entry::load()? };
     let instance = Instance::new(&entry, VALIDATION_ENABLED)?;
@@ -256,9 +259,9 @@ fn main() -> anyhow::Result<()> {
         }
     };
 
-    let depth_image =
+    let mut depth_image =
         create_depth_resources(&vulkan_context, vk::MemoryPropertyFlags::DEVICE_LOCAL)?;
-    let framebuffers = vulkan_context
+    let mut framebuffers = vulkan_context
         .swapchain()
         .image_views()
         .iter()
@@ -288,13 +291,22 @@ fn main() -> anyhow::Result<()> {
     )?;
 
     let (vertices, indices) = load_model(&models.first().context("Failed to load model.")?.clone());
+    let mut cube_model = ForgeModel::new(
+        "Cube".to_string(),
+        vertices,
+        indices,
+        Some(Transform {
+            scale: Vec3::new(1.0, 1.0, 1.0),
+            ..Default::default()
+        }),
+    );
 
     let vertex_buffer = Buffer::from_data(
         &vulkan_context.physical_device,
         &vulkan_context.device.device,
         vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
         vk::BufferUsageFlags::STORAGE_BUFFER,
-        &vertices,
+        &cube_model.vertices,
     )?;
 
     let index_buffer = Buffer::from_data(
@@ -302,10 +314,10 @@ fn main() -> anyhow::Result<()> {
         &vulkan_context.device.device,
         vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
         vk::BufferUsageFlags::INDEX_BUFFER,
-        &indices,
+        &cube_model.indices,
     )?;
-    let mut show_demo = false;
-    let start_time = std::time::Instant::now();
+
+    let mut resized = false;
     let mut event_pump = sdl_context.event_pump()?;
     'main_loop: loop {
         for event in event_pump.poll_iter() {
@@ -320,9 +332,7 @@ fn main() -> anyhow::Result<()> {
                     win_event: WindowEvent::Resized(..),
                     ..
                 } => {
-                    log::info!("Resizing");
-                    vulkan_context.resized()?;
-                    sync_handles = recreate_sync_handles(vulkan_context.device(), sync_handles)?;
+                    resized = true;
                 }
                 _ => {}
             }
@@ -337,6 +347,46 @@ fn main() -> anyhow::Result<()> {
         //    &mut acquire_semaphore,
         //    &mut present_semaphore,
         //)?;
+        if resized {
+            log::info!("Resizing");
+            vulkan_context.resized()?;
+            unsafe {
+                framebuffers.iter().for_each(|framebuffer| {
+                    vulkan_context
+                        .device()
+                        .destroy_framebuffer(*framebuffer, None);
+                });
+                depth_image.destroy(vulkan_context.device());
+            }
+
+            depth_image =
+                create_depth_resources(&vulkan_context, vk::MemoryPropertyFlags::DEVICE_LOCAL)?;
+            framebuffers = vulkan_context
+                .swapchain()
+                .image_views()
+                .iter()
+                .filter_map(|image_view| {
+                    let image_views = &[*image_view, depth_image.image_view];
+                    log::info!(
+                        "Creating framebuffers with {}-{}",
+                        vulkan_context.swapchain_extent().width,
+                        vulkan_context.swapchain_extent().height
+                    );
+                    forge::create_framebuffer(
+                        vulkan_context.device(),
+                        render_pass,
+                        image_views,
+                        vulkan_context.swapchain_extent().width,
+                        vulkan_context.swapchain_extent().height,
+                    )
+                    .ok()
+                })
+                .collect::<Vec<_>>();
+            sync_handles = recreate_sync_handles(vulkan_context.device(), sync_handles)?;
+            imgui_renderer.resized(vulkan_context.swapchain())?;
+            resized = false;
+            continue;
+        }
 
         let (image_index, _is_suboptimal) = vulkan_context
             .swapchain()
@@ -425,12 +475,12 @@ fn main() -> anyhow::Result<()> {
                 .buffer_info(buffer_info)
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)];
 
-            let time = start_time.elapsed().as_secs_f32();
-            let model = nalgebra_glm::rotate(
-                &nalgebra_glm::Mat4::identity(),
-                time,
-                &Vec3::new(1.0, 1.0, 0.0),
-            );
+            let model =
+                nalgebra_glm::scale(&nalgebra_glm::Mat4::identity(), &cube_model.transform.scale);
+            let model = nalgebra_glm::rotate_x(&model, cube_model.transform.rotation.x);
+            let model = nalgebra_glm::rotate_y(&model, cube_model.transform.rotation.y);
+            let model = nalgebra_glm::rotate_z(&model, cube_model.transform.rotation.z);
+            let model = nalgebra_glm::translate(&model, &cube_model.transform.position);
             let projection = nalgebra_glm::perspective_fov_rh_zo(
                 f32::to_radians(45.0),
                 vulkan_context.swapchain_extent().width as f32,
@@ -503,7 +553,7 @@ fn main() -> anyhow::Result<()> {
                     );
                     vulkan_context.device().cmd_draw_indexed(
                         command_buffer,
-                        indices.len() as u32,
+                        cube_model.indices.len() as u32,
                         1,
                         0,
                         0,
@@ -557,7 +607,7 @@ fn main() -> anyhow::Result<()> {
                     );
                     vulkan_context.device().cmd_draw_indexed(
                         command_buffer,
-                        indices.len() as u32,
+                        cube_model.indices.len() as u32,
                         1,
                         0,
                         0,
@@ -598,20 +648,21 @@ fn main() -> anyhow::Result<()> {
                     imgui_renderer.start_frame(
                         vulkan_context.swapchain_extent(),
                         &window,
+                        &event_pump,
                         image_index,
                     )?;
                     imgui_renderer.draw(|ui| {
                         if let Some(wnd) = ui
-                            .window("Hello World")
+                            .window("Forge")
                             .size([300.0, 400.0], imgui::Condition::FirstUseEver)
                             .begin()
                         {
-                            if show_demo {
-                                ui.show_demo_window(&mut show_demo);
-                            }
-
-                            ui.text("Hello, world!");
-                            ui.checkbox("Show Demo", &mut show_demo);
+                            ui.input_float3("Position", cube_model.transform.position.as_mut())
+                                .build();
+                            ui.input_float3("Rotation", cube_model.transform.rotation.as_mut())
+                                .build();
+                            ui.input_float3("Scale", cube_model.transform.scale.as_mut())
+                                .build();
 
                             wnd.end();
                         }

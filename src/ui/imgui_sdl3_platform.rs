@@ -1,23 +1,29 @@
-use imgui::{Context, Io, Key};
+use imgui::{BackendFlags, ConfigFlags, Context, Io, Key, MouseCursor};
 use sdl3::{
     event::Event,
     keyboard::{Mod, Scancode},
-    mouse::MouseButton,
+    mouse::{Cursor, MouseButton, MouseState, SystemCursor},
+    EventPump,
 };
+use std::time::Instant;
 
-pub struct ImguiSdlPlatform {}
+pub struct ImguiSdlPlatform {
+    cursor: Option<Cursor>,
+    last_frame: Instant,
+}
 
 impl ImguiSdlPlatform {
     pub fn new(imgui_ctx: &mut Context) -> Self {
         let io = imgui_ctx.io_mut();
-        io.backend_flags
-            .insert(imgui::BackendFlags::HAS_MOUSE_CURSORS);
-        io.backend_flags
-            .insert(imgui::BackendFlags::HAS_SET_MOUSE_POS);
+        io.backend_flags.insert(BackendFlags::HAS_MOUSE_CURSORS);
+        io.backend_flags.insert(BackendFlags::HAS_SET_MOUSE_POS);
 
-        io.config_flags.insert(imgui::ConfigFlags::DOCKING_ENABLE);
+        io.config_flags.insert(ConfigFlags::DOCKING_ENABLE);
 
-        Self {}
+        Self {
+            cursor: None,
+            last_frame: Instant::now(),
+        }
     }
 
     fn sdl3_key_to_imgui(sdl3_keycode: Option<Scancode>) -> Option<imgui::Key> {
@@ -130,9 +136,26 @@ impl ImguiSdlPlatform {
         );
     }
 
+    fn to_sdl_cursor(cursor: MouseCursor) -> SystemCursor {
+        match cursor {
+            MouseCursor::Arrow => SystemCursor::Arrow,
+            MouseCursor::TextInput => SystemCursor::IBeam,
+            MouseCursor::ResizeAll => SystemCursor::SizeAll,
+            MouseCursor::ResizeNS => SystemCursor::SizeNS,
+            MouseCursor::ResizeEW => SystemCursor::SizeWE,
+            MouseCursor::ResizeNESW => SystemCursor::SizeNESW,
+            MouseCursor::ResizeNWSE => SystemCursor::SizeNWSE,
+            MouseCursor::Hand => SystemCursor::Hand,
+            MouseCursor::NotAllowed => SystemCursor::No,
+        }
+    }
+
     pub fn process_event(&self, imgui_ctx: &mut Context, event: &Event) {
         let io = imgui_ctx.io_mut();
         match *event {
+            Event::TextInput { ref text, .. } => {
+                text.chars().for_each(|ch| io.add_input_character(ch));
+            }
             Event::KeyDown {
                 scancode, keymod, ..
             } => {
@@ -179,22 +202,51 @@ impl ImguiSdlPlatform {
                     io.add_mouse_button_event(btn, false);
                 }
             }
-            Event::TextInput { ref text, .. } => {
-                log::info!("{}", text);
-                text.chars().for_each(|ch| io.add_input_character(ch));
-            }
             _ => {}
         }
     }
 
     pub fn new_frame(
-        &self,
+        &mut self,
         imgui_ctx: &mut Context,
         window: &sdl3::video::Window,
+        event_pump: &EventPump,
     ) -> anyhow::Result<()> {
+        let mouse_cursor = imgui_ctx.mouse_cursor();
+        let io = imgui_ctx.io_mut();
+        let now = Instant::now();
+
+        io.update_delta_time(now.duration_since(self.last_frame));
+        self.last_frame = now;
+
+        let mouse_state = MouseState::new(event_pump);
+        let mouse = window.subsystem().sdl().mouse();
+        if io.want_set_mouse_pos {
+            mouse.warp_mouse_in_window(window, io.mouse_pos[0], io.mouse_pos[1]);
+        }
+        io.mouse_pos = [mouse_state.x(), mouse_state.y()];
+        if !io
+            .config_flags
+            .contains(ConfigFlags::NO_MOUSE_CURSOR_CHANGE)
+        {
+            match mouse_cursor {
+                Some(mouse_cursor) if !io.mouse_draw_cursor => {
+                    let cursor = Cursor::from_system(Self::to_sdl_cursor(mouse_cursor)).unwrap();
+                    cursor.set();
+
+                    mouse.show_cursor(true);
+                    self.cursor = Some(cursor);
+                }
+
+                _ => {
+                    mouse.show_cursor(false);
+                    self.cursor = None;
+                }
+            }
+        }
+
         let (mut width, mut height) = window.size();
         let (d_width, d_height) = window.size_in_pixels();
-        let io = imgui_ctx.io_mut();
         if window.is_minimized() {
             width = 0;
             height = 0;

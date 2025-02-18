@@ -4,13 +4,14 @@ use crate::{
     image::Image,
     physical_device::PhysicalDevice,
     renderer::{buffer::Buffer, vulkan_context::VulkanContext},
+    swapchain::Swapchain,
 };
 use ash::vk;
 use imgui::{
     sys::{ImDrawIdx, ImDrawVert},
     Context, FontAtlasTexture, Ui,
 };
-use sdl3::event::Event;
+use sdl3::{event::Event, EventPump};
 use std::sync::Arc;
 
 pub struct ImguiVulkanRenderer {
@@ -244,6 +245,36 @@ impl ImguiVulkanRenderer {
         }
     }
 
+    pub fn resized(&mut self, swapchain: &Swapchain) -> anyhow::Result<()> {
+        unsafe {
+            self.framebuffers.iter().for_each(|framebuffer| {
+                self.device.device.destroy_framebuffer(*framebuffer, None);
+            });
+
+            log::info!(
+                "Creating framebuffers with {}-{}",
+                swapchain.extent.width,
+                swapchain.extent.height
+            );
+            self.framebuffers = swapchain
+                .image_views()
+                .iter()
+                .filter_map(|image_view| {
+                    let views = &[*image_view];
+                    crate::create_framebuffer(
+                        &self.device.device,
+                        self.render_pass,
+                        views,
+                        swapchain.extent.width,
+                        swapchain.extent.height,
+                    )
+                    .ok()
+                })
+                .collect::<Vec<_>>();
+        }
+        Ok(())
+    }
+
     fn upload_font_image(
         physical_device: &PhysicalDevice,
         device: &Device,
@@ -299,10 +330,11 @@ impl ImguiVulkanRenderer {
         &mut self,
         extent: vk::Extent2D,
         window: &sdl3::video::Window,
+        event_pump: &EventPump,
         image_index: usize,
     ) -> anyhow::Result<()> {
         self.sdl_platform
-            .new_frame(&mut self.imgui_context, window)?;
+            .new_frame(&mut self.imgui_context, window, event_pump)?;
         self.current_command_buffer = self.command_buffers[image_index];
 
         let clear_values = &[vk::ClearValue {
@@ -419,74 +451,71 @@ impl ImguiVulkanRenderer {
         }
 
         // Most likely same values as the previous frame, no need to recreate buffers
-        if self.prev_vtx_count != draw_data.total_vtx_count
-            && self.prev_idx_count != draw_data.total_idx_count
-        {
-            let vtx_size = crate::align_buffer_size(
-                draw_data.total_vtx_count as u64 * size_of::<ImDrawVert>() as u64,
-                256,
-            );
-            let idx_size = crate::align_buffer_size(
-                draw_data.total_idx_count as u64 * size_of::<ImDrawIdx>() as u64,
-                256,
-            );
 
-            let vtx_buffer = Buffer::new(
-                &self.physical_device,
-                &self.device.device,
-                vtx_size,
-                vk::MemoryPropertyFlags::HOST_VISIBLE,
-                vk::BufferUsageFlags::VERTEX_BUFFER,
-            )?;
-            let vtx_ptr = vtx_buffer.map_memory(&self.device.device)?;
+        let vtx_size = crate::align_buffer_size(
+            draw_data.total_vtx_count as u64 * size_of::<ImDrawVert>() as u64,
+            256,
+        );
+        let idx_size = crate::align_buffer_size(
+            draw_data.total_idx_count as u64 * size_of::<ImDrawIdx>() as u64,
+            256,
+        );
 
-            let idx_buffer = Buffer::new(
-                &self.physical_device,
-                &self.device.device,
-                idx_size,
-                vk::MemoryPropertyFlags::HOST_VISIBLE,
-                vk::BufferUsageFlags::INDEX_BUFFER,
-            )?;
-            let idx_ptr = idx_buffer.map_memory(&self.device.device)?;
+        let vtx_buffer = Buffer::new(
+            &self.physical_device,
+            &self.device.device,
+            vtx_size,
+            vk::MemoryPropertyFlags::HOST_VISIBLE,
+            vk::BufferUsageFlags::VERTEX_BUFFER,
+        )?;
+        let vtx_ptr = vtx_buffer.map_memory(&self.device.device)?;
 
-            let mut vtx_vec = Vec::with_capacity(draw_data.total_vtx_count as usize);
-            let mut idx_vec = Vec::with_capacity(draw_data.total_idx_count as usize);
-            draw_data.draw_lists().for_each(|draw_list| {
-                vtx_vec.extend_from_slice(draw_list.vtx_buffer());
-                idx_vec.extend_from_slice(draw_list.idx_buffer());
-            });
-            unsafe {
-                (vtx_vec.as_ptr() as *mut std::ffi::c_void)
-                    .copy_to_nonoverlapping(vtx_ptr, size_of::<ImDrawVert>() * vtx_vec.len());
-                (idx_vec.as_ptr() as *mut std::ffi::c_void)
-                    .copy_to_nonoverlapping(idx_ptr, size_of::<ImDrawIdx>() * idx_vec.len());
-            }
+        let idx_buffer = Buffer::new(
+            &self.physical_device,
+            &self.device.device,
+            idx_size,
+            vk::MemoryPropertyFlags::HOST_VISIBLE,
+            vk::BufferUsageFlags::INDEX_BUFFER,
+        )?;
+        let idx_ptr = idx_buffer.map_memory(&self.device.device)?;
 
-            let ranges = &[
-                vk::MappedMemoryRange::default()
-                    .memory(vtx_buffer.memory)
-                    .size(vk::WHOLE_SIZE),
-                vk::MappedMemoryRange::default()
-                    .memory(idx_buffer.memory)
-                    .size(vk::WHOLE_SIZE),
-            ];
-            unsafe {
-                self.device.device.flush_mapped_memory_ranges(ranges)?;
-                idx_buffer.unmap_memory(&self.device.device);
-                vtx_buffer.unmap_memory(&self.device.device);
-            }
-
-            if let Some(idx_buffer) = &self.idx_buffer {
-                idx_buffer.destroy(&self.device.device);
-            }
-            if let Some(vtx_buffer) = &self.vtx_buffer {
-                vtx_buffer.destroy(&self.device.device);
-            }
-            self.prev_idx_count = draw_data.total_idx_count;
-            self.prev_vtx_count = draw_data.total_vtx_count;
-            self.idx_buffer = Some(idx_buffer);
-            self.vtx_buffer = Some(vtx_buffer);
+        let mut vtx_vec = Vec::with_capacity(draw_data.total_vtx_count as usize);
+        let mut idx_vec = Vec::with_capacity(draw_data.total_idx_count as usize);
+        draw_data.draw_lists().for_each(|draw_list| {
+            vtx_vec.extend_from_slice(draw_list.vtx_buffer());
+            idx_vec.extend_from_slice(draw_list.idx_buffer());
+        });
+        unsafe {
+            (vtx_vec.as_ptr() as *mut std::ffi::c_void)
+                .copy_to_nonoverlapping(vtx_ptr, size_of::<ImDrawVert>() * vtx_vec.len());
+            (idx_vec.as_ptr() as *mut std::ffi::c_void)
+                .copy_to_nonoverlapping(idx_ptr, size_of::<ImDrawIdx>() * idx_vec.len());
         }
+
+        let ranges = &[
+            vk::MappedMemoryRange::default()
+                .memory(vtx_buffer.memory)
+                .size(vk::WHOLE_SIZE),
+            vk::MappedMemoryRange::default()
+                .memory(idx_buffer.memory)
+                .size(vk::WHOLE_SIZE),
+        ];
+        unsafe {
+            self.device.device.flush_mapped_memory_ranges(ranges)?;
+            idx_buffer.unmap_memory(&self.device.device);
+            vtx_buffer.unmap_memory(&self.device.device);
+        }
+
+        if let Some(idx_buffer) = &self.idx_buffer {
+            idx_buffer.destroy(&self.device.device);
+        }
+        if let Some(vtx_buffer) = &self.vtx_buffer {
+            vtx_buffer.destroy(&self.device.device);
+        }
+        self.prev_idx_count = draw_data.total_idx_count;
+        self.prev_vtx_count = draw_data.total_vtx_count;
+        self.idx_buffer = Some(idx_buffer);
+        self.vtx_buffer = Some(vtx_buffer);
 
         let viewports = &[vk::Viewport::default()
             .x(0.0)

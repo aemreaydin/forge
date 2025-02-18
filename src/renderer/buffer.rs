@@ -1,4 +1,4 @@
-use super::physical_device::{PhysicalDevice};
+use super::physical_device::PhysicalDevice;
 use ash::vk;
 use bytemuck::{Pod, Zeroable};
 use std::{ffi::c_void, ptr::copy};

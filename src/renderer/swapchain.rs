@@ -48,7 +48,12 @@ impl Swapchain {
         device: &ash::Device,
     ) -> anyhow::Result<Arc<Self>> {
         if !self.swapchain.is_null() {
-            self.destroy(device);
+            unsafe {
+                for ind in 0..self.images.len() {
+                    device.destroy_image_view(self.image_views[ind], None);
+                }
+                Self::get_device_fns().destroy_swapchain(self.swapchain, None);
+            }
         }
 
         let surface_capabilities = self
@@ -56,6 +61,7 @@ impl Swapchain {
             .get_physical_device_surface_capabilities_khr(physical_device.physical_device)?;
         let extent = surface_capabilities.current_extent;
 
+        println!("{:?}", extent);
         let (swapchain, images, image_views, num_frames_in_flight) =
             Self::create_swapchain_resources(device, physical_device, &self.surface, extent)?;
 
