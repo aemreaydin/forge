@@ -293,7 +293,7 @@ impl ImguiVulkanRenderer {
                 .mip_levels(1)
                 .array_layers(1)
                 .sharing_mode(vk::SharingMode::EXCLUSIVE)
-                .format(vk::Format::R8G8B8A8_UNORM)
+                .format(vk::Format::R8G8B8A8_SRGB)
                 .extent(vk::Extent3D {
                     width: fonts.width,
                     height: fonts.height,
