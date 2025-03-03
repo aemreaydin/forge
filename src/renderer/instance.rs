@@ -127,7 +127,7 @@ impl Instance {
         let version =
             unsafe { entry.try_enumerate_instance_version()? }.unwrap_or(vk::API_VERSION_1_0);
 
-        let appinfo = vk::ApplicationInfo::default()
+        let application_info = vk::ApplicationInfo::default()
             .engine_name(app_name)
             .engine_version(0)
             .api_version(version);
@@ -139,7 +139,7 @@ impl Instance {
         };
 
         let create_info = vk::InstanceCreateInfo::default()
-            .application_info(&appinfo)
+            .application_info(&application_info)
             .enabled_layer_names(&layers)
             .enabled_extension_names(&extensions)
             .flags(create_flags);

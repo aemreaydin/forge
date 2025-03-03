@@ -71,10 +71,10 @@ impl Device {
         let mut device_support = DeviceSupport::default();
         optional_extensions.iter().for_each(|&ext| match ext {
             val if unsafe { CStr::from_ptr(val) } == ext::shader_object::NAME => {
-                device_support.shader_ext = false;
+                device_support.shader_ext = true;
             }
             val if unsafe { CStr::from_ptr(val) } == khr::dynamic_rendering::NAME => {
-                device_support.dynamic_rendering = false;
+                device_support.dynamic_rendering = true;
             }
             _ => {}
         });

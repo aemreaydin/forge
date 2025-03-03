@@ -1,4 +1,3 @@
-mod model;
 use anyhow::Context;
 use ash::{
     khr,
@@ -6,6 +5,7 @@ use ash::{
 };
 use either::Either;
 use forge::{
+    camera::LookAtCamera,
     renderer::{
         buffer::{Buffer, Vertex},
         image::Image,
@@ -15,13 +15,44 @@ use forge::{
     },
     ui::imgui_renderer::ImguiVulkanRenderer,
 };
-use model::{Model as ForgeModel, Transform};
 use nalgebra_glm::{Vec2, Vec3, Vec4};
 use sdl3::{
     event::{Event, WindowEvent},
     keyboard::Keycode,
 };
-use tobj::{LoadOptions, Model};
+use tobj::{LoadOptions, Model as TObjModel};
+
+#[derive(Default, Debug, Clone, Copy)]
+pub struct Transform {
+    pub position: Vec3,
+    pub rotation: Vec3,
+    pub scale: Vec3,
+}
+
+#[derive(Default, Debug, Clone)]
+pub struct Model {
+    #[allow(unused)]
+    pub name: String,
+    pub vertices: Vec<Vertex>,
+    pub indices: Vec<u32>,
+    pub transform: Transform,
+}
+
+impl Model {
+    pub fn new(
+        name: String,
+        vertices: Vec<Vertex>,
+        indices: Vec<u32>,
+        transform: Option<Transform>,
+    ) -> Self {
+        Self {
+            name,
+            vertices,
+            indices,
+            transform: transform.unwrap_or_default(),
+        }
+    }
+}
 
 const VALIDATION_ENABLED: bool = cfg!(debug_assertions);
 
@@ -59,7 +90,7 @@ impl SyncHandles {
     }
 }
 
-pub fn load_model(model: &Model) -> (Vec<Vertex>, Vec<u32>) {
+pub fn load_model(model: &TObjModel) -> (Vec<Vertex>, Vec<u32>) {
     let mesh = &model.mesh;
 
     let mut vertices = Vec::new();
@@ -291,7 +322,7 @@ fn main() -> anyhow::Result<()> {
     )?;
 
     let (vertices, indices) = load_model(&models.first().context("Failed to load model.")?.clone());
-    let mut cube_model = ForgeModel::new(
+    let cube_model = Model::new(
         "Cube".to_string(),
         vertices,
         indices,
@@ -317,9 +348,25 @@ fn main() -> anyhow::Result<()> {
         &cube_model.indices,
     )?;
 
+    let mut camera = LookAtCamera::new(
+        Vec3::new(0.0, 0.0, -2.0),
+        cube_model.transform.position,
+        45.0,
+        vulkan_context.swapchain_extent().width as f32,
+        vulkan_context.swapchain_extent().height as f32,
+        0.1,
+        100.0,
+    );
+
+    let mut last_tick = std::time::Instant::now();
+
     let mut resized = false;
     let mut event_pump = sdl_context.event_pump()?;
     'main_loop: loop {
+        let now = std::time::Instant::now();
+        let delta_time = now.duration_since(last_tick);
+        last_tick = now;
+
         for event in event_pump.poll_iter() {
             imgui_renderer.process_event(&event);
             match event {
@@ -333,6 +380,19 @@ fn main() -> anyhow::Result<()> {
                     ..
                 } => {
                     resized = true;
+                }
+                Event::MouseMotion {
+                    mousestate,
+                    xrel,
+                    yrel,
+                    ..
+                } => {
+                    if mousestate.middle() {
+                        camera.orbit(xrel, yrel, delta_time.as_secs_f32());
+                    }
+                }
+                Event::MouseWheel { y, .. } => {
+                    camera.zoom(y, delta_time.as_secs_f32());
                 }
                 _ => {}
             }
@@ -481,19 +541,8 @@ fn main() -> anyhow::Result<()> {
             let model = nalgebra_glm::rotate_y(&model, cube_model.transform.rotation.y);
             let model = nalgebra_glm::rotate_z(&model, cube_model.transform.rotation.z);
             let model = nalgebra_glm::translate(&model, &cube_model.transform.position);
-            let projection = nalgebra_glm::perspective_fov_rh_zo(
-                f32::to_radians(45.0),
-                vulkan_context.swapchain_extent().width as f32,
-                vulkan_context.swapchain_extent().height as f32,
-                0.01,
-                10.0,
-            );
-            let view = nalgebra_glm::look_at_rh(
-                &Vec3::new(0.0, 0.0, -1.0),
-                &Vec3::default(),
-                &Vec3::new(0.0, 1.0, 0.0),
-            );
-            let mvp = projection * view * model;
+            let mvp = camera.view_projection() * model;
+
             match &either_pipeline_or_objects {
                 Either::Left((vert_shader, frag_shader)) => {
                     let color_attachments = &[vk::RenderingAttachmentInfo::default()
@@ -642,34 +691,32 @@ fn main() -> anyhow::Result<()> {
                         &[],
                         &[to_present_barrier],
                     );
-
-                    vulkan_context.device().end_command_buffer(command_buffer)?;
-
-                    imgui_renderer.start_frame(
-                        vulkan_context.swapchain_extent(),
-                        &window,
-                        &event_pump,
-                        image_index,
-                    )?;
-                    imgui_renderer.draw(|ui| {
-                        if let Some(wnd) = ui
-                            .window("Forge")
-                            .size([300.0, 400.0], imgui::Condition::FirstUseEver)
-                            .begin()
-                        {
-                            ui.input_float3("Position", cube_model.transform.position.as_mut())
-                                .build();
-                            ui.input_float3("Rotation", cube_model.transform.rotation.as_mut())
-                                .build();
-                            ui.input_float3("Scale", cube_model.transform.scale.as_mut())
-                                .build();
-
-                            wnd.end();
-                        }
-                    })?;
-                    imgui_renderer.end_frame(vulkan_context.swapchain().image(image_index))?;
                 }
             }
+            vulkan_context.device().end_command_buffer(command_buffer)?;
+
+            imgui_renderer.start_frame(
+                vulkan_context.swapchain_extent(),
+                &window,
+                &event_pump,
+                image_index,
+            )?;
+            imgui_renderer.draw(|ui| {
+                if let Some(wnd) = ui
+                    .window("Forge")
+                    .size([300.0, 400.0], imgui::Condition::FirstUseEver)
+                    .begin()
+                {
+                    ui.slider("Camera Zoom Speed", 1.0, 10.0, &mut camera.zoom_speed);
+                    ui.slider("Camera Orbit Speed", 1.0, 60.0, &mut camera.orbit_speed);
+                    if ui.button("Reset Camera Settings") {
+                        camera.reset_settings();
+                    }
+
+                    wnd.end();
+                }
+            })?;
+            imgui_renderer.end_frame(vulkan_context.swapchain().image(image_index))?;
 
             let cmds = &[command_buffer, imgui_renderer.current_command_buffer];
             let waits = &[sync_handles.acquire];
