@@ -6,12 +6,8 @@ use std::sync::Arc;
 pub struct VulkanContext {
     pub instance: Arc<instance::Instance>,
     pub device: Arc<device::Device>,
-
-    swapchain: Arc<swapchain::Swapchain>,
     pub physical_device: Arc<physical_device::PhysicalDevice>,
-    pub graphics_queue: Arc<vk::Queue>,
-    pub compute_queue: Arc<vk::Queue>,
-    pub transfer_queue: Arc<vk::Queue>,
+    swapchain: Arc<swapchain::Swapchain>,
 }
 
 impl VulkanContext {
@@ -32,30 +28,11 @@ impl VulkanContext {
             surface,
         )?;
 
-        let graphics_queue = unsafe {
-            device
-                .device
-                .get_device_queue(physical_device.queue_indices.graphics, 0)
-        };
-        let compute_queue = unsafe {
-            device
-                .device
-                .get_device_queue(physical_device.queue_indices.compute, 0)
-        };
-        let transfer_queue = unsafe {
-            device
-                .device
-                .get_device_queue(physical_device.queue_indices.transfer, 0)
-        };
-
         Ok(Self {
             instance: Arc::new(instance),
             device: Arc::new(device),
             swapchain,
             physical_device: Arc::new(physical_device),
-            graphics_queue: Arc::new(graphics_queue),
-            compute_queue: Arc::new(compute_queue),
-            transfer_queue: Arc::new(transfer_queue),
         })
     }
 

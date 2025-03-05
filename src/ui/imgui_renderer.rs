@@ -154,7 +154,7 @@ impl ImguiVulkanRenderer {
         let font_image = Self::upload_font_image(
             &physical_device,
             &device,
-            *vulkan_context.graphics_queue,
+            vulkan_context.device.graphics_queue,
             &fonts,
             *temp_cmd
                 .first()
@@ -353,35 +353,10 @@ impl ImguiVulkanRenderer {
                 offset: vk::Offset2D { x: 0, y: 0 },
             });
 
-        //let to_transfer_barrier = vk::ImageMemoryBarrier::default()
-        //    .src_access_mask(vk::AccessFlags::empty())
-        //    .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_READ)
-        //    .old_layout(vk::ImageLayout::UNDEFINED)
-        //    .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-        //    .image(self.ctx.swapchain().image(image_index))
-        //    .subresource_range(vk::ImageSubresourceRange {
-        //        aspect_mask: vk::ImageAspectFlags::COLOR,
-        //        base_mip_level: 0,
-        //        level_count: 1,
-        //        base_array_layer: 0,
-        //        layer_count: 1,
-        //    })
-        //    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-        //    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED);
-
         unsafe {
             self.device
                 .device
                 .begin_command_buffer(self.current_command_buffer, &begin_info)?;
-            //self.ctx.device().cmd_pipeline_barrier(
-            //    self.current_command_buffer,
-            //    vk::PipelineStageFlags::TOP_OF_PIPE,
-            //    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-            //    vk::DependencyFlags::empty(),
-            //    &[],
-            //    &[],
-            //    &[to_transfer_barrier],
-            //);
             self.device.device.cmd_begin_render_pass(
                 self.current_command_buffer,
                 &render_pass_begin,

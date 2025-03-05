@@ -21,84 +21,95 @@ pub struct Device {
     pub device: ash::Device,
     pub device_support: DeviceSupport,
 
+    pub graphics_queue: vk::Queue,
+    pub compute_queue: vk::Queue,
+    pub transfer_queue: vk::Queue,
+
     pub graphics_command_pool: vk::CommandPool,
 }
 
 impl Device {
     pub fn new(instance: &ash::Instance, physical_device: &PhysicalDevice) -> anyhow::Result<Self> {
-        let device_extensions = unsafe {
-            instance.enumerate_device_extension_properties(physical_device.physical_device)?
-        };
-        let required_extensions = Self::get_required_device_extensions(&device_extensions)?;
-        let optional_extensions = Self::get_optional_device_extensions(&device_extensions);
-        let extensions = required_extensions
-            .iter()
-            .chain(optional_extensions.iter())
-            .cloned()
-            .collect::<Vec<_>>();
-        let queue_create_infos = [
-            vk::DeviceQueueCreateInfo {
-                queue_count: 1,
-                queue_family_index: physical_device.queue_indices.graphics,
-                ..Default::default()
-            }
-            .queue_priorities(&[1.0]),
-            vk::DeviceQueueCreateInfo {
-                queue_count: 1,
-                queue_family_index: physical_device.queue_indices.compute,
-                ..Default::default()
-            }
-            .queue_priorities(&[1.0]),
-            vk::DeviceQueueCreateInfo {
-                queue_count: 1,
-                queue_family_index: physical_device.queue_indices.transfer,
-                ..Default::default()
-            }
-            .queue_priorities(&[1.0]),
-        ];
+        unsafe {
+            let device_extensions =
+                instance.enumerate_device_extension_properties(physical_device.physical_device)?;
+            let required_extensions = Self::get_required_device_extensions(&device_extensions)?;
+            let optional_extensions = Self::get_optional_device_extensions(&device_extensions);
+            let extensions = required_extensions
+                .iter()
+                .chain(optional_extensions.iter())
+                .cloned()
+                .collect::<Vec<_>>();
+            let queue_create_infos = [
+                vk::DeviceQueueCreateInfo {
+                    queue_count: 1,
+                    queue_family_index: physical_device.queue_indices.graphics,
+                    ..Default::default()
+                }
+                .queue_priorities(&[1.0]),
+                vk::DeviceQueueCreateInfo {
+                    queue_count: 1,
+                    queue_family_index: physical_device.queue_indices.compute,
+                    ..Default::default()
+                }
+                .queue_priorities(&[1.0]),
+                vk::DeviceQueueCreateInfo {
+                    queue_count: 1,
+                    queue_family_index: physical_device.queue_indices.transfer,
+                    ..Default::default()
+                }
+                .queue_priorities(&[1.0]),
+            ];
+            // TODO: Probably clean this up
+            let physical_device_features = vk::PhysicalDeviceFeatures::default().depth_bounds(true);
+            let mut shader_object =
+                vk::PhysicalDeviceShaderObjectFeaturesEXT::default().shader_object(true);
+            let mut dynamic_rendering =
+                vk::PhysicalDeviceDynamicRenderingFeaturesKHR::default().dynamic_rendering(true);
+            let mut physical_device_features = vk::PhysicalDeviceFeatures2::default()
+                .features(physical_device_features)
+                .push_next(&mut dynamic_rendering)
+                .push_next(&mut shader_object);
 
-        // TODO: Probably clean this up
-        let physical_device_features = vk::PhysicalDeviceFeatures::default().depth_bounds(true);
-        let mut shader_object =
-            vk::PhysicalDeviceShaderObjectFeaturesEXT::default().shader_object(true);
-        let mut dynamic_rendering =
-            vk::PhysicalDeviceDynamicRenderingFeaturesKHR::default().dynamic_rendering(true);
-        let mut physical_device_features = vk::PhysicalDeviceFeatures2::default()
-            .features(physical_device_features)
-            .push_next(&mut dynamic_rendering)
-            .push_next(&mut shader_object);
+            let mut device_support = DeviceSupport::default();
+            optional_extensions.iter().for_each(|&ext| match ext {
+                val if { CStr::from_ptr(val) } == ext::shader_object::NAME => {
+                    device_support.shader_ext = true;
+                }
+                val if { CStr::from_ptr(val) } == khr::dynamic_rendering::NAME => {
+                    device_support.dynamic_rendering = true;
+                }
+                _ => {}
+            });
 
-        let mut device_support = DeviceSupport::default();
-        optional_extensions.iter().for_each(|&ext| match ext {
-            val if unsafe { CStr::from_ptr(val) } == ext::shader_object::NAME => {
-                device_support.shader_ext = true;
-            }
-            val if unsafe { CStr::from_ptr(val) } == khr::dynamic_rendering::NAME => {
-                device_support.dynamic_rendering = true;
-            }
-            _ => {}
-        });
+            let create_info = vk::DeviceCreateInfo::default()
+                .queue_create_infos(&queue_create_infos)
+                .enabled_extension_names(&extensions)
+                .push_next(&mut physical_device_features);
+            let device =
+                instance.create_device(physical_device.physical_device, &create_info, None)?;
 
-        let create_info = vk::DeviceCreateInfo::default()
-            .queue_create_infos(&queue_create_infos)
-            .enabled_extension_names(&extensions)
-            .push_next(&mut physical_device_features);
-        let device =
-            unsafe { instance.create_device(physical_device.physical_device, &create_info, None)? };
+            let graphics_queue = device.get_device_queue(physical_device.queue_indices.graphics, 0);
+            let compute_queue = device.get_device_queue(physical_device.queue_indices.compute, 0);
+            let transfer_queue = device.get_device_queue(physical_device.queue_indices.transfer, 0);
 
-        let graphics_command_pool = crate::create_command_pool(
-            &device,
-            physical_device.queue_indices.graphics,
-            vk::CommandPoolCreateFlags::TRANSIENT
-                | vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
-        )?;
+            let graphics_command_pool = crate::create_command_pool(
+                &device,
+                physical_device.queue_indices.graphics,
+                vk::CommandPoolCreateFlags::TRANSIENT
+                    | vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
+            )?;
+            Ok(Self {
+                device,
+                device_support,
 
-        Ok(Self {
-            device,
-            device_support,
+                graphics_queue,
+                compute_queue,
+                transfer_queue,
 
-            graphics_command_pool,
-        })
+                graphics_command_pool,
+            })
+        }
     }
 
     pub fn destroy(&self) {

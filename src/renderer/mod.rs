@@ -1,6 +1,9 @@
+use ::image::ImageReader;
 use anyhow::{anyhow, Context};
 use ash::vk;
 use std::path::Path;
+
+use crate::scene::texture::TextureData;
 
 pub mod base_renderer;
 pub mod buffer;
@@ -117,6 +120,20 @@ pub fn load_shader<P: AsRef<Path>, T: bytemuck::Pod>(path: P) -> anyhow::Result<
     Ok(bytemuck::try_cast_slice::<u8, T>(&bytes)
         .expect("Failed to cast shader to u8.")
         .to_vec())
+}
+
+pub fn load_image<P: AsRef<Path>>(path: P) -> anyhow::Result<TextureData> {
+    let image = ImageReader::open(path)?.decode()?;
+    let width = image.width();
+    let height = image.height();
+
+    let data = image.to_rgba8().into_vec();
+
+    Ok(TextureData {
+        width,
+        height,
+        data,
+    })
 }
 
 pub fn create_shader_module<P: AsRef<Path>>(

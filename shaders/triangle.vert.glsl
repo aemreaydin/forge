@@ -15,6 +15,7 @@ layout(push_constant) uniform PushConstants {
 } push_constants;
 
 layout(location = 0) out vec3 outColor;
+layout(location = 1) out vec2 outTex;
 
 vec3 rotateX(vec3 pos, float angle) {
     float s = sin(angle);
@@ -45,6 +46,7 @@ void main() {
     
     gl_Position = push_constants.mvp * vertex.position;
     outColor = vec3((vertex.normal * 0.5).xyz + 0.5);
+    outTex = vertex.tex_coords.xy;
     // Apply rotations
     // pos = rotateX(pos, xRotation);
     // pos = rotateY(pos, yRotation);

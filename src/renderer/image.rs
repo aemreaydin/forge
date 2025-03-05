@@ -1,4 +1,4 @@
-use super::{buffer::Buffer, physical_device::PhysicalDevice};
+use super::{buffer::Buffer, device::Device, physical_device::PhysicalDevice};
 use anyhow::Context;
 use ash::vk;
 use bytemuck::Pod;
@@ -54,6 +54,52 @@ impl Image {
                 memory,
             })
         }
+    }
+
+    pub fn from_data<T: Pod>(
+        physical_device: &PhysicalDevice,
+        device: &Device,
+        data: &[T],
+        required_memory_flags: vk::MemoryPropertyFlags,
+        image_create_info: vk::ImageCreateInfo,
+        view_type: vk::ImageViewType,
+        subresource_range: vk::ImageSubresourceRange,
+    ) -> anyhow::Result<Self> {
+        let slf = Self::new(
+            physical_device,
+            &device.device,
+            required_memory_flags,
+            image_create_info,
+            view_type,
+            subresource_range,
+        )?;
+
+        unsafe {
+            let command_buffer_allocate_info = vk::CommandBufferAllocateInfo::default()
+                .command_buffer_count(1)
+                .command_pool(device.graphics_command_pool);
+            let command_buffers = device
+                .device
+                .allocate_command_buffers(&command_buffer_allocate_info)?;
+            let cmd = command_buffers
+                .first()
+                .expect("Failed to create a command buffer.");
+
+            slf.copy_to_host(
+                physical_device,
+                &device.device,
+                device.graphics_queue,
+                *cmd,
+                data,
+                image_create_info.extent,
+            )?;
+
+            device
+                .device
+                .free_command_buffers(device.graphics_command_pool, &command_buffers);
+        }
+
+        Ok(slf)
     }
 
     pub fn copy_to_host<T: Pod>(

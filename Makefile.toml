@@ -41,5 +41,5 @@ dependencies = ["format"]
 [tasks.testbed]
 command = "cargo"
 env = { "RUST_LOG" = "info" }
-args = ["run", "--example", "testbed", "meshes/cube.obj"]
+args = ["run", "--example", "testbed", "meshes/spot_triangulated.obj"]
 dependencies = ["parallel_build"]
