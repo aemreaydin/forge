@@ -1,9 +1,11 @@
+use crate::scene::texture::TextureData;
 use ::image::ImageReader;
 use anyhow::{anyhow, Context};
 use ash::vk;
+use buffer::Vertex;
+use nalgebra_glm::{Vec2, Vec4};
 use std::path::Path;
-
-use crate::scene::texture::TextureData;
+use tobj::Model;
 
 pub mod base_renderer;
 pub mod buffer;
@@ -120,6 +122,29 @@ pub fn load_shader<P: AsRef<Path>, T: bytemuck::Pod>(path: P) -> anyhow::Result<
     Ok(bytemuck::try_cast_slice::<u8, T>(&bytes)
         .expect("Failed to cast shader to u8.")
         .to_vec())
+}
+
+pub fn load_model(model: &Model) -> (Vec<Vertex>, Vec<u32>) {
+    let mesh = &model.mesh;
+
+    let mut vertices = Vec::new();
+    let indices = mesh.indices.clone();
+
+    for vtx in 0..mesh.positions.len() / 3 {
+        vertices.push(Vertex {
+            position: Vec4::new(
+                mesh.positions[3 * vtx],
+                mesh.positions[3 * vtx + 1],
+                mesh.positions[3 * vtx + 2],
+                1.0,
+            ),
+            // TODO: Normals are 0 right now
+            normal: Vec4::zeros(),
+            tex_coords: Vec2::new(mesh.texcoords[2 * vtx], 1.0 - mesh.texcoords[2 * vtx + 1]),
+            ..Default::default()
+        });
+    }
+    (vertices, indices)
 }
 
 pub fn load_image<P: AsRef<Path>>(path: P) -> anyhow::Result<TextureData> {

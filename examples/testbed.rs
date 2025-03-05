@@ -4,26 +4,24 @@ use ash::{
     vk::{self, ClearValue},
 };
 use forge::{
+    assets::{AssetRegistry, AssetType},
     camera::LookAtCamera,
     load_image,
     renderer::{
-        buffer::Vertex, image::Image, instance::Instance, shader_object::ShaderObject,
+        image::Image, instance::Instance, shader_object::ShaderObject,
         vulkan_context::VulkanContext,
     },
     scene::{
-        mesh::Mesh,
         model::{Model, Transform},
         texture::Texture,
     },
     ui::imgui_renderer::ImguiVulkanRenderer,
 };
-use nalgebra_glm::{Vec2, Vec3, Vec4};
+use nalgebra_glm::Vec3;
 use sdl3::{
     event::{Event, WindowEvent},
     keyboard::Keycode,
 };
-use std::sync::Arc;
-use tobj::{LoadOptions, Model as TObjModel};
 
 const VALIDATION_ENABLED: bool = cfg!(debug_assertions);
 
@@ -61,29 +59,6 @@ impl SyncHandles {
     }
 }
 
-pub fn load_model(model: &TObjModel) -> (Vec<Vertex>, Vec<u32>) {
-    let mesh = &model.mesh;
-
-    let mut vertices = Vec::new();
-    let indices = mesh.indices.clone();
-
-    for vtx in 0..mesh.positions.len() / 3 {
-        vertices.push(Vertex {
-            position: Vec4::new(
-                mesh.positions[3 * vtx],
-                mesh.positions[3 * vtx + 1],
-                mesh.positions[3 * vtx + 2],
-                1.0,
-            ),
-            // TODO: Normals are 0 right now
-            normal: Vec4::zeros(),
-            tex_coords: Vec2::new(mesh.texcoords[2 * vtx], 1.0 - mesh.texcoords[2 * vtx + 1]),
-            ..Default::default()
-        });
-    }
-    (vertices, indices)
-}
-
 fn main() -> anyhow::Result<()> {
     let mesh_path = std::env::args()
         .nth(1)
@@ -103,6 +78,8 @@ fn main() -> anyhow::Result<()> {
         .resizable()
         .build()?;
     video_subsystem.text_input().start(&window);
+
+    let asset_registry = AssetRegistry::new();
 
     let entry = unsafe { ash::Entry::load()? };
     let instance = Instance::new(&entry, VALIDATION_ENABLED)?;
@@ -219,32 +196,38 @@ fn main() -> anyhow::Result<()> {
 
     let mut sync_handles = SyncHandles::new(vulkan_context.device(), false)?;
 
-    let (models, _materials) = tobj::load_obj(
-        mesh_path,
-        &LoadOptions {
-            triangulate: true,
-            single_index: true,
-            ..Default::default()
-        },
-    )?;
+    let mesh_handle = asset_registry
+        .register(&vulkan_context, mesh_path.into(), AssetType::Mesh)
+        .unwrap();
 
-    let (vertices, indices) = load_model(&models.first().context("Failed to load model.")?.clone());
-    let mesh = Mesh::new(&vulkan_context, vertices, indices)?;
-    let mut cube_model = Model::new(
-        "Spot".to_string(),
-        vec![Arc::new(mesh)],
-        Some(Transform {
-            scale: Vec3::new(1.0, 1.0, 1.0),
-            ..Default::default()
-        }),
-    );
+    let mesh = asset_registry.get_mesh(mesh_handle).unwrap();
+    let mut cube_models = vec![
+        Model::new(
+            "Spot".to_string(),
+            vec![mesh.clone()],
+            Some(Transform {
+                position: Vec3::new(1.0, 0.0, 0.0),
+                scale: Vec3::new(0.4, 0.4, 0.4),
+                ..Default::default()
+            }),
+        ),
+        Model::new(
+            "Spot01".to_string(),
+            vec![mesh],
+            Some(Transform {
+                position: Vec3::new(-2.0, 0.0, 0.0),
+                scale: Vec3::new(0.3, 0.3, 0.3),
+                ..Default::default()
+            }),
+        ),
+    ];
     let cube_image = load_image("meshes/spot_texture.png")?;
     let cube_texture = Texture::from_2d_data(&vulkan_context, cube_image)?;
     let cube_sampler = forge::create_sampler(vulkan_context.device())?;
 
     let mut camera = LookAtCamera::new(
         Vec3::new(0.0, 0.0, -2.0),
-        cube_model.transform.position,
+        Vec3::new(0.0, 0.0, 0.0),
         45.0,
         vulkan_context.swapchain_extent().width as f32,
         vulkan_context.swapchain_extent().height as f32,
@@ -419,14 +402,6 @@ fn main() -> anyhow::Result<()> {
                 .device()
                 .cmd_set_scissor(command_buffer, 0, scissors);
 
-            let model =
-                nalgebra_glm::scale(&nalgebra_glm::Mat4::identity(), &cube_model.transform.scale);
-            let model = nalgebra_glm::rotate_x(&model, cube_model.transform.rotation.x);
-            let model = nalgebra_glm::rotate_y(&model, cube_model.transform.rotation.y);
-            let model = nalgebra_glm::rotate_z(&model, cube_model.transform.rotation.z);
-            let model = nalgebra_glm::translate(&model, &cube_model.transform.position);
-            let mvp = camera.view_projection() * model;
-
             let color_attachments = &[vk::RenderingAttachmentInfo::default()
                 .image_view(vulkan_context.swapchain().image_view(image_index))
                 .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
@@ -461,60 +436,72 @@ fn main() -> anyhow::Result<()> {
                 scissors,
             );
 
-            if cube_model.visible {
-                cube_model.meshes.iter().for_each(|mesh| {
-                    let buffer_info = &[vk::DescriptorBufferInfo::default()
-                        .buffer(mesh.vertex_buffer.buffer)
-                        .offset(0)
-                        .range(mesh.vertex_buffer.size)];
-                    let image_info = &[vk::DescriptorImageInfo::default()
-                        .image_view(cube_texture.image.image_view)
-                        .sampler(cube_sampler)
-                        .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
-                    let descriptor_writes = &[
-                        vk::WriteDescriptorSet::default()
-                            .descriptor_count(1)
-                            .dst_binding(0)
-                            .buffer_info(buffer_info)
-                            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER),
-                        vk::WriteDescriptorSet::default()
-                            .descriptor_count(1)
-                            .dst_binding(1)
-                            .image_info(image_info)
-                            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER),
-                    ];
-                    push_desc_loader.cmd_push_descriptor_set(
-                        command_buffer,
-                        vk::PipelineBindPoint::GRAPHICS,
-                        pipeline_layout,
-                        0,
-                        descriptor_writes,
-                    );
-                    vulkan_context.device().cmd_bind_index_buffer(
-                        command_buffer,
-                        mesh.index_buffer.buffer,
-                        0,
-                        vk::IndexType::UINT32,
-                    );
-                    vulkan_context.device().cmd_push_constants(
-                        command_buffer,
-                        pipeline_layout,
-                        vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, // same as above
-                        0,
-                        std::slice::from_raw_parts(
-                            mvp.as_ptr() as *const u8,
-                            std::mem::size_of::<nalgebra_glm::Mat4>(),
-                        ),
-                    );
-                    vulkan_context.device().cmd_draw_indexed(
-                        command_buffer,
-                        mesh.indices.len() as u32,
-                        1,
-                        0,
-                        0,
-                        0,
-                    );
-                });
+            for cube_model in &cube_models {
+                let model = nalgebra_glm::scale(
+                    &nalgebra_glm::Mat4::identity(),
+                    &cube_model.transform.scale,
+                );
+                let model = nalgebra_glm::rotate_x(&model, cube_model.transform.rotation.x);
+                let model = nalgebra_glm::rotate_y(&model, cube_model.transform.rotation.y);
+                let model = nalgebra_glm::rotate_z(&model, cube_model.transform.rotation.z);
+                let model = nalgebra_glm::translate(&model, &cube_model.transform.position);
+                let mvp = camera.view_projection() * model;
+
+                if cube_model.visible {
+                    cube_model.meshes.iter().for_each(|mesh| {
+                        let buffer_info = &[vk::DescriptorBufferInfo::default()
+                            .buffer(mesh.vertex_buffer.buffer)
+                            .offset(0)
+                            .range(mesh.vertex_buffer.size)];
+                        let image_info = &[vk::DescriptorImageInfo::default()
+                            .image_view(cube_texture.image.image_view)
+                            .sampler(cube_sampler)
+                            .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
+                        let descriptor_writes = &[
+                            vk::WriteDescriptorSet::default()
+                                .descriptor_count(1)
+                                .dst_binding(0)
+                                .buffer_info(buffer_info)
+                                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER),
+                            vk::WriteDescriptorSet::default()
+                                .descriptor_count(1)
+                                .dst_binding(1)
+                                .image_info(image_info)
+                                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER),
+                        ];
+                        push_desc_loader.cmd_push_descriptor_set(
+                            command_buffer,
+                            vk::PipelineBindPoint::GRAPHICS,
+                            pipeline_layout,
+                            0,
+                            descriptor_writes,
+                        );
+                        vulkan_context.device().cmd_bind_index_buffer(
+                            command_buffer,
+                            mesh.index_buffer.buffer,
+                            0,
+                            vk::IndexType::UINT32,
+                        );
+                        vulkan_context.device().cmd_push_constants(
+                            command_buffer,
+                            pipeline_layout,
+                            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, // same as above
+                            0,
+                            std::slice::from_raw_parts(
+                                mvp.as_ptr() as *const u8,
+                                std::mem::size_of::<nalgebra_glm::Mat4>(),
+                            ),
+                        );
+                        vulkan_context.device().cmd_draw_indexed(
+                            command_buffer,
+                            mesh.indices.len() as u32,
+                            1,
+                            0,
+                            0,
+                            0,
+                        );
+                    });
+                }
             }
 
             vulkan_context.device().cmd_end_rendering(command_buffer);
@@ -538,7 +525,9 @@ fn main() -> anyhow::Result<()> {
                         camera.reset_settings();
                     }
 
-                    ui.checkbox(&cube_model.name, &mut cube_model.visible);
+                    for cube_model in &mut cube_models {
+                        ui.checkbox(&cube_model.name, &mut cube_model.visible);
+                    }
 
                     wnd.end();
                 }
@@ -595,21 +584,8 @@ fn main() -> anyhow::Result<()> {
                 .destroy_framebuffer(*framebuffer, None);
         });
 
-        cube_model.meshes.iter().for_each(|mesh| {
-            vulkan_context
-                .device()
-                .free_memory(mesh.vertex_buffer.memory, None);
-            vulkan_context
-                .device()
-                .destroy_buffer(mesh.vertex_buffer.buffer, None);
+        asset_registry.unload_assets(&vulkan_context);
 
-            vulkan_context
-                .device()
-                .free_memory(mesh.index_buffer.memory, None);
-            vulkan_context
-                .device()
-                .destroy_buffer(mesh.index_buffer.buffer, None);
-        });
         vulkan_context
             .device()
             .free_command_buffers(command_pool, &command_buffers);
