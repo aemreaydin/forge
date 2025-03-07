@@ -405,6 +405,7 @@ dependencies = [
  "anyhow",
  "ash",
  "bytemuck",
+ "either",
  "env_logger",
  "gltf",
  "image",

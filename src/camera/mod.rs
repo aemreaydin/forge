@@ -1,11 +1,12 @@
 use nalgebra_glm::{Mat4, Vec3};
+pub mod fly_camera;
 
 const ZOOM_SPEED: f32 = 5.0;
 const MIN_DISTANCE: f32 = 0.5;
 const ORBIT_SPEED: f32 = 30.0;
 
 #[derive(Default, Debug)]
-pub struct LookAtCamera {
+pub struct Camera {
     pub position: Vec3,
     pub rotation: Vec3,
 
@@ -23,7 +24,7 @@ pub struct LookAtCamera {
     projection: Mat4,
 }
 
-impl LookAtCamera {
+impl Camera {
     pub fn new(
         position: Vec3,
         target: Vec3,
@@ -68,7 +69,7 @@ impl LookAtCamera {
         }
     }
 
-    pub fn reset_settings(&mut self) {
+    pub fn eeset_settings(&mut self) {
         self.zoom_speed = ZOOM_SPEED;
         self.orbit_speed = ORBIT_SPEED;
     }

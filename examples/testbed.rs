@@ -5,7 +5,7 @@ use ash::{
 };
 use forge::{
     assets::{AssetRegistry, AssetType},
-    camera::LookAtCamera,
+    camera::{fly_camera::FlyCamera, Camera},
     load_image,
     renderer::{
         image::Image, instance::Instance, shader_object::ShaderObject,
@@ -74,10 +74,13 @@ fn main() -> anyhow::Result<()> {
     let window = video_subsystem
         .window("forge", 1920, 1080)
         .position_centered()
+        .fullscreen()
         .vulkan()
         .resizable()
         .build()?;
     video_subsystem.text_input().start(&window);
+
+    let mouse = sdl_context.mouse();
 
     let asset_registry = AssetRegistry::new();
 
@@ -194,6 +197,7 @@ fn main() -> anyhow::Result<()> {
         .collect::<Vec<_>>();
     assert!(framebuffers.len() == vulkan_context.swapchain().image_views().len());
 
+    // TODO: Why do I have only one handle, lmao
     let mut sync_handles = SyncHandles::new(vulkan_context.device(), false)?;
 
     let mesh_handle = asset_registry
@@ -225,15 +229,23 @@ fn main() -> anyhow::Result<()> {
     let cube_texture = Texture::from_2d_data(&vulkan_context, cube_image)?;
     let cube_sampler = forge::create_sampler(vulkan_context.device())?;
 
-    let mut camera = LookAtCamera::new(
-        Vec3::new(0.0, 0.0, -2.0),
-        Vec3::new(0.0, 0.0, 0.0),
+    let mut camera = FlyCamera::new(
+        Vec3::new(0.0, 0.0, -5.0),
         45.0,
         vulkan_context.swapchain_extent().width as f32,
         vulkan_context.swapchain_extent().height as f32,
         0.1,
-        100.0,
+        1000.0,
     );
+    //let mut camera = Camera::new(
+    //    Vec3::new(0.0, 0.0, -10.0),
+    //    Vec3::new(0.0, 0.0, 0.0),
+    //    45.0,
+    //    vulkan_context.swapchain_extent().width as f32,
+    //    vulkan_context.swapchain_extent().height as f32,
+    //    0.1,
+    //    100.0,
+    //);
 
     let mut last_tick = std::time::Instant::now();
 
@@ -258,32 +270,19 @@ fn main() -> anyhow::Result<()> {
                 } => {
                     resized = true;
                 }
-                Event::MouseMotion {
-                    mousestate,
-                    xrel,
-                    yrel,
-                    ..
-                } => {
-                    if mousestate.middle() {
-                        camera.orbit(xrel, yrel, delta_time.as_secs_f32());
-                    }
-                }
-                Event::MouseWheel { y, .. } => {
-                    camera.zoom(y, delta_time.as_secs_f32());
-                }
                 _ => {}
             }
         }
 
-        //check_resize(
-        //    &vulkan_context,
-        //    format,
-        //    render_pass,
-        //    &mut extent,
-        //    &mut swapchain,
-        //    &mut acquire_semaphore,
-        //    &mut present_semaphore,
-        //)?;
+        let keyboard_state = event_pump.keyboard_state();
+        let mouse_state = event_pump.mouse_state();
+        println!("{}", mouse_state.x());
+        //camera.update(
+        //    &keyboard_state,
+        //    &mouse_state,
+        //    delta_time.as_secs_f32(),
+        //);
+
         if resized {
             log::info!("Resizing");
             vulkan_context.resized()?;
@@ -519,8 +518,8 @@ fn main() -> anyhow::Result<()> {
                     .size([300.0, 400.0], imgui::Condition::FirstUseEver)
                     .begin()
                 {
-                    ui.slider("Camera Zoom Speed", 1.0, 10.0, &mut camera.zoom_speed);
-                    ui.slider("Camera Orbit Speed", 1.0, 60.0, &mut camera.orbit_speed);
+                    ui.slider("Camera Zoom Speed", 1.0, 20.0, &mut camera.camera_speed);
+                    ui.slider("Camera Orbit Speed", 1.0, 60.0, &mut camera.rotation_speed);
                     if ui.button("Reset Camera Settings") {
                         camera.reset_settings();
                     }

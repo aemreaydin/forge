@@ -7,6 +7,7 @@ edition = "2021"
 anyhow = "1.0.92"
 ash = { version = "0.38.0", features = ["linked"] }
 bytemuck = { version = "1.19.0", features = ["derive"] }
+either = "1.14.0"
 env_logger = "0.11.5"
 gltf = "1.4.1"
 image = "0.25.5"
