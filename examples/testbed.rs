@@ -1,11 +1,12 @@
 use anyhow::Context;
 use ash::{
     khr,
-    vk::{self, ClearValue},
+    vk::{self, ClearValue, Extent2D, Rect2D},
 };
 use forge::{
     assets::{AssetRegistry, AssetType},
-    camera::{fly_camera::FlyCamera, Camera},
+    buffer::Vertex,
+    camera::fly_camera::FlyCamera,
     load_image,
     renderer::{
         image::Image, instance::Instance, shader_object::ShaderObject,
@@ -74,7 +75,7 @@ fn main() -> anyhow::Result<()> {
     let window = video_subsystem
         .window("forge", 1920, 1080)
         .position_centered()
-        .fullscreen()
+        // .fullscreen()
         .vulkan()
         .resizable()
         .build()?;
@@ -84,7 +85,7 @@ fn main() -> anyhow::Result<()> {
 
     let asset_registry = AssetRegistry::new();
 
-    let entry = unsafe { ash::Entry::load()? };
+    let entry = ash::Entry::linked();
     let instance = Instance::new(&entry, VALIDATION_ENABLED)?;
     let surface = window.vulkan_create_surface(instance.instance.handle())?;
     let mut vulkan_context = VulkanContext::new(entry, instance, surface)?;
@@ -127,6 +128,22 @@ fn main() -> anyhow::Result<()> {
         push_constant_ranges,
         &[descriptor_set_layout],
     )?;
+
+    let vert_module =
+        forge::create_shader_module(vulkan_context.device(), "shaders/triangle.vert.spv")?;
+    let frag_module =
+        forge::create_shader_module(vulkan_context.device(), "shaders/triangle.frag.spv")?;
+
+    let graphics_pipeline = forge::create_graphics_pipeline(
+        vulkan_context.device(),
+        render_pass,
+        pipeline_layout,
+        vk::PipelineDepthStencilStateCreateInfo::default(),
+        vk::PipelineVertexInputStateCreateInfo::default(),
+        vert_module,
+        frag_module,
+    )?;
+
     let descriptor_pool = forge::create_descriptor_pool(
         vulkan_context.device(),
         &[vk::DescriptorPoolSize {
@@ -149,33 +166,33 @@ fn main() -> anyhow::Result<()> {
             .allocate_command_buffers(&command_buffer_allocate_info)?
     };
 
-    let (vert_shader, frag_shader) = {
-        log::info!("Using Shader Object");
-        let push_constant_ranges = &[vk::PushConstantRange::default()
-            .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
-            .offset(0)
-            .size(size_of::<nalgebra_glm::Mat4>() as u32)];
-        let vert_shader = ShaderObject::new(
-            vulkan_context.instance(),
-            vulkan_context.device(),
-            c"main",
-            vk::ShaderStageFlags::VERTEX,
-            &forge::load_shader::<_, u8>("shaders/triangle.vert.spv")?,
-            &[descriptor_set_layout],
-            push_constant_ranges,
-        )?;
-        let frag_shader = ShaderObject::new(
-            vulkan_context.instance(),
-            vulkan_context.device(),
-            c"main",
-            vk::ShaderStageFlags::FRAGMENT,
-            &forge::load_shader::<_, u8>("shaders/triangle.frag.spv")?,
-            &[descriptor_set_layout],
-            push_constant_ranges,
-        )?;
-
-        (vert_shader, frag_shader)
-    };
+    // let (vert_shader, frag_shader) = {
+    //     log::info!("Using Shader Object");
+    //     let push_constant_ranges = &[vk::PushConstantRange::default()
+    //         .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
+    //         .offset(0)
+    //         .size(size_of::<nalgebra_glm::Mat4>() as u32)];
+    //     let vert_shader = ShaderObject::new(
+    //         vulkan_context.instance(),
+    //         vulkan_context.device(),
+    //         c"main",
+    //         vk::ShaderStageFlags::VERTEX,
+    //         &forge::load_shader::<_, u8>("shaders/triangle.vert.spv")?,
+    //         &[descriptor_set_layout],
+    //         push_constant_ranges,
+    //     )?;
+    //     let frag_shader = ShaderObject::new(
+    //         vulkan_context.instance(),
+    //         vulkan_context.device(),
+    //         c"main",
+    //         vk::ShaderStageFlags::FRAGMENT,
+    //         &forge::load_shader::<_, u8>("shaders/triangle.frag.spv")?,
+    //         &[descriptor_set_layout],
+    //         push_constant_ranges,
+    //     )?;
+    //
+    //     (vert_shader, frag_shader)
+    // };
 
     let mut depth_image =
         create_depth_resources(&vulkan_context, vk::MemoryPropertyFlags::DEVICE_LOCAL)?;
@@ -276,7 +293,6 @@ fn main() -> anyhow::Result<()> {
 
         let keyboard_state = event_pump.keyboard_state();
         let mouse_state = event_pump.mouse_state();
-        println!("{}", mouse_state.x());
         //camera.update(
         //    &keyboard_state,
         //    &mouse_state,
@@ -422,18 +438,40 @@ fn main() -> anyhow::Result<()> {
                 .color_attachments(color_attachments)
                 .depth_attachment(&depth_attachment);
 
-            vulkan_context
-                .device()
-                .cmd_begin_rendering(command_buffer, &rendering_info);
-            vert_shader.bind_shader(command_buffer, &[vk::ShaderStageFlags::VERTEX]);
-            frag_shader.bind_shader(command_buffer, &[vk::ShaderStageFlags::FRAGMENT]);
-            ShaderObject::set_vertex_input(command_buffer, &[], &[]);
-            ShaderObject::set_dynamic_state(
-                vulkan_context.device(),
+            let render_pass_begin = vk::RenderPassBeginInfo::default()
+                .render_pass(render_pass)
+                .framebuffer(framebuffers[image_index])
+                .render_area(Rect2D {
+                    offset: vk::Offset2D { x: 0, y: 0 },
+                    extent: Extent2D {
+                        width: vulkan_context.swapchain_extent().width,
+                        height: vulkan_context.swapchain_extent().height,
+                    },
+                })
+                .clear_values(&clear_values);
+            vulkan_context.device().cmd_begin_render_pass(
                 command_buffer,
-                viewports,
-                scissors,
+                &render_pass_begin,
+                vk::SubpassContents::INLINE,
             );
+            // vulkan_context
+            //     .device()
+            //     .cmd_begin_rendering(command_buffer, &rendering_info);
+            vulkan_context.device().cmd_bind_pipeline(
+                command_buffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                graphics_pipeline,
+            );
+            // TODO: Can I only make one bind call here?
+            // vert_shader.bind_shader(command_buffer, &[vk::ShaderStageFlags::VERTEX]);
+            // frag_shader.bind_shader(command_buffer, &[vk::ShaderStageFlags::FRAGMENT]);
+            // ShaderObject::set_vertex_input(command_buffer, &[], &[]);
+            // ShaderObject::set_dynamic_state(
+            //     vulkan_context.device(),
+            //     command_buffer,
+            //     viewports,
+            //     scissors,
+            // );
 
             for cube_model in &cube_models {
                 let model = nalgebra_glm::scale(
@@ -503,7 +541,8 @@ fn main() -> anyhow::Result<()> {
                 }
             }
 
-            vulkan_context.device().cmd_end_rendering(command_buffer);
+            vulkan_context.device().cmd_end_render_pass(command_buffer);
+            // vulkan_context.device().cmd_end_rendering(command_buffer);
             vulkan_context.device().end_command_buffer(command_buffer)?;
 
             imgui_renderer.start_frame(
@@ -592,8 +631,11 @@ fn main() -> anyhow::Result<()> {
             .device()
             .destroy_command_pool(command_pool, None);
 
-        vert_shader.destroy();
-        frag_shader.destroy();
+        vulkan_context
+            .device()
+            .destroy_pipeline(graphics_pipeline, None);
+        // vert_shader.destroy();
+        // frag_shader.destroy();
 
         vulkan_context
             .device()

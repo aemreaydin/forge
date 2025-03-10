@@ -56,7 +56,7 @@ impl ShaderObject {
     ) {
         unsafe {
             let device_fns = Self::get_device_fns();
-            device_fns.cmd_set_primitive_restart_enable(command_buffer, false);
+            device_fns.cmd_set_primitive_restart_enable(command_buffer, true);
             device_fns.cmd_set_alpha_to_coverage_enable(command_buffer, false);
             device_fns.cmd_set_viewport_with_count(command_buffer, viewports);
             device_fns.cmd_set_scissor_with_count(command_buffer, scissors);
@@ -68,7 +68,8 @@ impl ShaderObject {
             device_fns.cmd_set_depth_test_enable(command_buffer, true);
             device_fns.cmd_set_depth_write_enable(command_buffer, true);
             device_fns.cmd_set_depth_compare_op(command_buffer, vk::CompareOp::LESS);
-            device_fns.cmd_set_depth_bounds_test_enable(command_buffer, true);
+            // TODO: If depth bounds feature is enabled
+            device_fns.cmd_set_depth_bounds_test_enable(command_buffer, false);
             device.cmd_set_depth_bounds(command_buffer, 0.0, 1.0);
             device_fns.cmd_set_depth_bias_enable(command_buffer, true);
             device.cmd_set_depth_bias(command_buffer, 0.0, 0.0, 0.0);

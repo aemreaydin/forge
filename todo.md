@@ -1,5 +1,7 @@
 # Forge Checklist
 
+!! What is the point of dynamic rendering?
+
 - [ ] Check ultraviolet crate
 - [ ] Use OnceLock for device and instance fns
 - [ ] Rust build.rs for shader building
@@ -15,8 +17,7 @@
 - [ ] Check for format and colorspace when creating a swapchain
 - [ ] Pipeline handles might be useful
 - [ ] Add pipeline cache
-- [ ] Timeline
-  semaphores - [Vulkan Samples](https://github.com/KhronosGroup/Vulkan-Samples/tree/main/samples/extensions/timeline_semaphore)
+- [ ] Timeline semaphores - [Vulkan Samples](https://github.com/KhronosGroup/Vulkan-Samples/tree/main/samples/extensions/timeline_semaphore)
 - [ ] Most places have queue family index hard-coded
 - [ ] Learn about color blending and use cases
 - [ ] Create own surface without using any libraries (will need to write platform code)
@@ -26,14 +27,11 @@
 - [ ] Add better check for physical device selection
 - [ ] Add pipelineCache for graphics pipeline
 - [ ] Check out rust-gpu for shader code
-- [ ] Check out bindless descriptors
-  in [Vulkan Samples](https://github.com/KhronosGroup/Vulkan-Samples/tree/main/samples/extensions/descriptor_indexing)
+- [ ] Check out bindless descriptors in [Vulkan Samples](https://github.com/KhronosGroup/Vulkan-Samples/tree/main/samples/extensions/descriptor_indexing)
 - [ ] MSAA
 - [ ] Graphics pipeline from JSON or YAML
-- [ ]
-  VK_EXT_graphics_pipeline_library - [Vulkan Samples](https://github.com/KhronosGroup/Vulkan-Samples/tree/main/samples/extensions/graphics_pipeline_library)
-- [ ]
-  VK_KHR_dynamic_rendering - [Vulkan Samples](https://github.com/KhronosGroup/Vulkan-Samples/tree/main/samples/extensions/dynamic_rendering)
+- [ ] VK_EXT_graphics_pipeline_library - [Vulkan Samples](https://github.com/KhronosGroup/Vulkan-Samples/tree/main/samples/extensions/graphics_pipeline_library)
+- [ ] VK_KHR_dynamic_rendering - [Vulkan Samples](https://github.com/KhronosGroup/Vulkan-Samples/tree/main/samples/extensions/dynamic_rendering)
 - [ ] Run shader files inside rust macros that compile glsl during compile time
 - [ ] Mesh shaders
 - [ ] Validation of createinfos

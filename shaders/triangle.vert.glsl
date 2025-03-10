@@ -3,7 +3,7 @@
 struct Vertex {
     vec4 position;
     vec4 normal;
-    vec3 tex_coords;
+    vec2 tex_coords;
 };
 
 layout(binding = 0) readonly buffer Vertices {
@@ -11,7 +11,7 @@ layout(binding = 0) readonly buffer Vertices {
 };
 
 layout(push_constant) uniform PushConstants {
-  mat4 mvp;
+    mat4 mvp;
 } push_constants;
 
 layout(location = 0) out vec3 outColor;
@@ -43,10 +43,10 @@ void main() {
 
     Vertex vertex = vertices[gl_VertexIndex];
     // vec3 pos = vertex.position.xyz;
-    
+
     gl_Position = push_constants.mvp * vertex.position;
     outColor = vec3((vertex.normal * 0.5).xyz + 0.5);
-    outTex = vertex.tex_coords.xy;
+    outTex = vertex.tex_coords;
     // Apply rotations
     // pos = rotateX(pos, xRotation);
     // pos = rotateY(pos, yRotation);

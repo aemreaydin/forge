@@ -1,5 +1,5 @@
 use anyhow::anyhow;
-use ash::{ext, khr, vk, Entry};
+use ash::{vk, Entry};
 use std::ffi::CStr;
 
 const VALIDATION_LAYER: &CStr = c"VK_LAYER_KHRONOS_validation";
@@ -7,19 +7,19 @@ const OPTIONAL_INSTANCE_LAYERS: &[&std::ffi::CStr] = &[c"VK_LAYER_KHRONOS_shader
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 const REQUIRED_INSTANCE_EXTENSIONS: &[&std::ffi::CStr] = &[
-    vk::EXT_METAL_SURFACE_NAME,
-    khr::portability_enumeration::NAME,
-    khr::get_physical_device_properties2::NAME,
-    mvk::macos_surface::NAME,
+    ash::vk::EXT_METAL_SURFACE_NAME,
+    ash::khr::portability_enumeration::NAME,
+    ash::khr::get_physical_device_properties2::NAME,
+    ash::mvk::macos_surface::NAME,
 ];
 #[cfg(target_os = "linux")]
-const REQUIRED_INSTANCE_EXTENSIONS: &[&std::ffi::CStr] = &[khr::xlib_surface::NAME];
+const REQUIRED_INSTANCE_EXTENSIONS: &[&std::ffi::CStr] = &[ash::khr::xlib_surface::NAME];
 #[cfg(target_os = "windows")]
-const REQUIRED_INSTANCE_EXTENSIONS: &[&std::ffi::CStr] = &[khr::win32_surface::NAME];
+const REQUIRED_INSTANCE_EXTENSIONS: &[&std::ffi::CStr] = &[ash::khr::win32_surface::NAME];
 
 pub struct DebugUtils {
     debug_utils_messenger: vk::DebugUtilsMessengerEXT,
-    loader: ext::debug_utils::Instance,
+    loader: ash::ext::debug_utils::Instance,
 }
 impl DebugUtils {
     pub fn new(entry: &Entry, instance: &ash::Instance) -> anyhow::Result<Self> {
@@ -35,7 +35,7 @@ impl DebugUtils {
                     | vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE,
             )
             .pfn_user_callback(Some(Self::vulkan_debug_callback));
-        let loader = ext::debug_utils::Instance::new(entry, instance);
+        let loader = ash::ext::debug_utils::Instance::new(entry, instance);
         let debug_utils_messenger =
             unsafe { loader.create_debug_utils_messenger(&debug_info, None)? };
 
@@ -117,16 +117,23 @@ impl Instance {
         };
         layers.extend(Self::validate_optional_layers(&layer_properties));
 
-        let mut required_extensions = vec![khr::surface::NAME];
+        let mut required_extensions = vec![ash::khr::surface::NAME];
         required_extensions.extend(REQUIRED_INSTANCE_EXTENSIONS);
         let extensions = Self::validate_required_instance_extensions(
             entry,
             &required_extensions,
             enable_validation,
         )?;
-        let version =
-            unsafe { entry.try_enumerate_instance_version()? }.unwrap_or(vk::API_VERSION_1_0);
 
+        let version = if let Some(version) = unsafe { entry.try_enumerate_instance_version() }? {
+            let major = vk::api_version_major(version);
+            let minor = vk::api_version_minor(version);
+            let patch = vk::api_version_patch(version);
+            log::info!("Using Vulkan API Version: {}.{}.{}", major, minor, patch);
+            version
+        } else {
+            panic!("System must have Vulkan 1.3!")
+        };
         let application_info = vk::ApplicationInfo::default()
             .engine_name(app_name)
             .engine_version(0)
@@ -195,6 +202,7 @@ impl Instance {
                 .iter()
                 .filter_map(|layer| {
                     if layer_names.contains(layer) {
+                        log::info!("Adding optional layer {}.", layer.to_string_lossy());
                         Some(layer.as_ptr())
                     } else {
                         None

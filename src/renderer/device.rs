@@ -1,14 +1,20 @@
 use super::physical_device::PhysicalDevice;
 use anyhow::anyhow;
-use ash::{ext, khr, vk};
+use ash::vk;
 use std::ffi::CStr;
 
-#[cfg(any(target_os = "macos", target_os = "ios"))]
-const MACOS_REQUIRED_DEVICE_EXTENSIONS: &[*const i8] = &[khr::portability_subset::NAME.as_ptr()];
+const REQUIRED_DEVICE_EXTENSIONS: &[*const i8] = &[
+    vk::KHR_SWAPCHAIN_NAME.as_ptr(),
+    vk::KHR_PUSH_DESCRIPTOR_NAME.as_ptr(),
+];
 
-const OPTIONAL_DEVICE_EXTENSIONS: &[*const i8] = &[
-    ext::shader_object::NAME.as_ptr(),
-    khr::dynamic_rendering::NAME.as_ptr(),
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+const MACOS_REQUIRED_DEVICE_EXTENSIONS: &[*const i8] =
+    &[ash::khr::portability_subset::NAME.as_ptr()];
+
+const OPTIONAL_DEVICE_EXTENSIONS: &[&CStr] = &[
+    ash::khr::dynamic_rendering::NAME,
+    ash::ext::shader_object::NAME,
 ];
 
 #[derive(Debug, Default)]
@@ -60,27 +66,36 @@ impl Device {
                 }
                 .queue_priorities(&[1.0]),
             ];
-            // TODO: Probably clean this up
-            let physical_device_features = vk::PhysicalDeviceFeatures::default().depth_bounds(true);
+
+            let mut push_descriptor_props =
+                vk::PhysicalDevicePushDescriptorPropertiesKHR::default();
+            let mut physical_device_props =
+                vk::PhysicalDeviceProperties2::default().push_next(&mut push_descriptor_props);
+            instance.get_physical_device_properties2(
+                physical_device.physical_device,
+                &mut physical_device_props,
+            );
+
             let mut shader_object =
                 vk::PhysicalDeviceShaderObjectFeaturesEXT::default().shader_object(true);
             let mut dynamic_rendering =
                 vk::PhysicalDeviceDynamicRenderingFeaturesKHR::default().dynamic_rendering(true);
             let mut physical_device_features = vk::PhysicalDeviceFeatures2::default()
-                .features(physical_device_features)
+                .features(vk::PhysicalDeviceFeatures::default())
                 .push_next(&mut dynamic_rendering)
                 .push_next(&mut shader_object);
 
-            let mut device_support = DeviceSupport::default();
-            optional_extensions.iter().for_each(|&ext| match ext {
-                val if { CStr::from_ptr(val) } == ext::shader_object::NAME => {
-                    device_support.shader_ext = true;
-                }
-                val if { CStr::from_ptr(val) } == khr::dynamic_rendering::NAME => {
-                    device_support.dynamic_rendering = true;
-                }
-                _ => {}
-            });
+            let device_support = DeviceSupport::default();
+            // optional_extensions.iter().for_each(|&ext| match ext {
+            //     val if { CStr::from_ptr(val) } == ext::shader_object::NAME => {
+            //         device_support.shader_ext = shader_object.shader_object != 0;
+            //     }
+            //     val if { CStr::from_ptr(val) } == ash::khr::dynamic_rendering::NAME => {
+            //         log::info!("Supporting dynamic_rendering");
+            //         device_support.dynamic_rendering = dynamic_rendering.dynamic_rendering != 0;
+            //     }
+            //     _ => {}
+            // });
 
             let create_info = vk::DeviceCreateInfo::default()
                 .queue_create_infos(&queue_create_infos)
@@ -123,11 +138,7 @@ impl Device {
     fn get_required_device_extensions(
         device_extensions: &[vk::ExtensionProperties],
     ) -> anyhow::Result<Vec<*const i8>> {
-        #[allow(unused_mut)]
-        let mut required_extensions = vec![
-            vk::KHR_SWAPCHAIN_NAME.as_ptr(),
-            vk::KHR_PUSH_DESCRIPTOR_NAME.as_ptr(),
-        ];
+        let mut required_extensions = REQUIRED_DEVICE_EXTENSIONS.to_vec();
         #[cfg(any(target_os = "macos", target_os = "ios"))]
         required_extensions.extend_from_slice(MACOS_REQUIRED_DEVICE_EXTENSIONS);
 
@@ -153,20 +164,22 @@ impl Device {
         device_extensions: &[vk::ExtensionProperties],
     ) -> Vec<*const i8> {
         #[allow(unused_mut)]
-        let device_extension_names = unsafe {
-            device_extensions
-                .iter()
-                .map(|extension| std::ffi::CStr::from_ptr(extension.extension_name.as_ptr()))
-                .collect::<Vec<_>>()
-        };
+        let device_extension_names = device_extensions
+            .iter()
+            .map(|extension| extension.extension_name_as_c_str().unwrap())
+            .collect::<Vec<_>>();
 
         OPTIONAL_DEVICE_EXTENSIONS
             .iter()
-            .filter_map(|ext| {
-                let name = unsafe { std::ffi::CStr::from_ptr(*ext) };
-                if device_extension_names.contains(&name) {
-                    Some(*ext)
+            .filter_map(|&ext| {
+                if device_extension_names.contains(&ext) {
+                    log::info!("{} is supported", ext.to_string_lossy());
+                    Some(ext.as_ptr())
                 } else {
+                    log::warn!(
+                        "{} is not supported by current device",
+                        ext.to_string_lossy()
+                    );
                     None
                 }
             })

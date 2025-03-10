@@ -17,6 +17,7 @@ pub mod shader_object;
 pub mod surface;
 pub mod swapchain;
 pub mod vulkan_context;
+pub mod vulkan_renderer;
 
 pub enum FrameState {
     PRESENT,
