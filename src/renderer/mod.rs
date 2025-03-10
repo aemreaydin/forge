@@ -273,6 +273,7 @@ pub fn create_graphics_pipeline(
     pipeline_layout: vk::PipelineLayout,
     depth_stencil_state: vk::PipelineDepthStencilStateCreateInfo,
     vertex_state: vk::PipelineVertexInputStateCreateInfo,
+    rasterization_state: vk::PipelineRasterizationStateCreateInfo,
     vert_module: vk::ShaderModule,
     frag_module: vk::ShaderModule,
 ) -> anyhow::Result<vk::Pipeline> {
@@ -309,11 +310,6 @@ pub fn create_graphics_pipeline(
         )];
     let color_blend_state =
         vk::PipelineColorBlendStateCreateInfo::default().attachments(color_attachment_states);
-
-    let rasterization_state = vk::PipelineRasterizationStateCreateInfo::default()
-        .line_width(1.0)
-        .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
-        .cull_mode(vk::CullModeFlags::NONE);
 
     let viewport_state = vk::PipelineViewportStateCreateInfo::default()
         .viewport_count(1)

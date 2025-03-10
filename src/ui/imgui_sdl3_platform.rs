@@ -247,6 +247,12 @@ impl ImguiSdlPlatform {
 
         let (mut width, mut height) = window.size();
         let (d_width, d_height) = window.size_in_pixels();
+        let density = window.pixel_density();
+
+        log::info!("Window Size: ({}, {})", width, height);
+        log::info!("Window Drawable Size: ({}, {})", d_width, d_height);
+        log::info!("Window Pixel Density: ({})", density);
+
         if window.is_minimized() {
             width = 0;
             height = 0;

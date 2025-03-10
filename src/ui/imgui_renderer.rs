@@ -117,6 +117,12 @@ impl ImguiVulkanRenderer {
             vk::PipelineVertexInputStateCreateInfo::default()
                 .vertex_binding_descriptions(binding_descs)
                 .vertex_attribute_descriptions(attribute_descs),
+            vk::PipelineRasterizationStateCreateInfo::default()
+                .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
+                .depth_bias_enable(true)
+                .polygon_mode(vk::PolygonMode::FILL)
+                .line_width(1.0)
+                .cull_mode(vk::CullModeFlags::NONE),
             vert_module,
             frag_module,
         )?;
@@ -425,17 +431,10 @@ impl ImguiVulkanRenderer {
             return Ok(());
         }
 
-        // Most likely same values as the previous frame, no need to recreate buffers
-
         let vtx_size = crate::align_buffer_size(
             draw_data.total_vtx_count as u64 * size_of::<ImDrawVert>() as u64,
             256,
         );
-        let idx_size = crate::align_buffer_size(
-            draw_data.total_idx_count as u64 * size_of::<ImDrawIdx>() as u64,
-            256,
-        );
-
         let vtx_buffer = Buffer::new(
             &self.physical_device,
             &self.device.device,
@@ -445,6 +444,10 @@ impl ImguiVulkanRenderer {
         )?;
         let vtx_ptr = vtx_buffer.map_memory(&self.device.device)?;
 
+        let idx_size = crate::align_buffer_size(
+            draw_data.total_idx_count as u64 * size_of::<ImDrawIdx>() as u64,
+            256,
+        );
         let idx_buffer = Buffer::new(
             &self.physical_device,
             &self.device.device,
@@ -554,20 +557,19 @@ impl ImguiVulkanRenderer {
 
             let clip_off = draw_data.display_pos;
             let clip_scale = draw_data.framebuffer_scale;
-            let mut clip_min = [0.0, 0.0];
-            let mut clip_max = [0.0, 0.0];
+            println!("{:?}", clip_scale);
             let mut vtx_offset = 0;
             let mut idx_offset = 0;
-            draw_data.draw_lists().for_each(|draw_list| {
-                draw_list.commands().for_each(|draw_cmd| {
+            for draw_list in draw_data.draw_lists() {
+                for draw_cmd in draw_list.commands() {
                     // TODO: UserCallback https://github.com/ocornut/imgui/blob/e4db4e423d78bce7e6c050f1f0710b3b635a9871/backends/imgui_impl_vulkan.cpp#L580
                     match draw_cmd {
                         imgui::DrawCmd::Elements { count, cmd_params } => {
-                            clip_min = [
+                            let mut clip_min = [
                                 (cmd_params.clip_rect[0] - clip_off[0]) * clip_scale[0],
                                 (cmd_params.clip_rect[1] - clip_off[1]) * clip_scale[1],
                             ];
-                            clip_max = [
+                            let mut clip_max = [
                                 (cmd_params.clip_rect[2] - clip_off[0]) * clip_scale[0],
                                 (cmd_params.clip_rect[3] - clip_off[1]) * clip_scale[1],
                             ];
@@ -584,9 +586,9 @@ impl ImguiVulkanRenderer {
                                 clip_max[1] = height;
                             }
                             // TODO: Check if this ever is an issue
-                            //if clip_max[0] <= clip_min[0] || clip_max[1] <= clip_max[1] {
-                            //    continue;
-                            //}
+                            if clip_max[0] <= clip_min[0] || clip_max[1] <= clip_min[1] {
+                                continue;
+                            }
 
                             let scissors = &[vk::Rect2D {
                                 extent: vk::Extent2D {
@@ -624,10 +626,10 @@ impl ImguiVulkanRenderer {
                         imgui::DrawCmd::ResetRenderState => todo!(),
                         imgui::DrawCmd::RawCallback { .. } => todo!(),
                     }
-                });
+                }
                 idx_offset += draw_list.idx_buffer().len();
                 vtx_offset += draw_list.vtx_buffer().len();
-            });
+            }
 
             let scissors = &[vk::Rect2D {
                 extent: vk::Extent2D {

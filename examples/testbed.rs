@@ -5,7 +5,6 @@ use ash::{
 };
 use forge::{
     assets::{AssetRegistry, AssetType},
-    buffer::Vertex,
     camera::fly_camera::FlyCamera,
     load_image,
     renderer::{
@@ -138,8 +137,20 @@ fn main() -> anyhow::Result<()> {
         vulkan_context.device(),
         render_pass,
         pipeline_layout,
-        vk::PipelineDepthStencilStateCreateInfo::default(),
+        vk::PipelineDepthStencilStateCreateInfo::default()
+            .depth_bounds_test_enable(false)
+            .depth_test_enable(true)
+            .depth_write_enable(true)
+            .depth_compare_op(vk::CompareOp::LESS)
+            .front(vk::StencilOpState::default().compare_op(vk::CompareOp::ALWAYS))
+            .back(vk::StencilOpState::default().compare_op(vk::CompareOp::ALWAYS)),
         vk::PipelineVertexInputStateCreateInfo::default(),
+        vk::PipelineRasterizationStateCreateInfo::default()
+            .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
+            .depth_bias_enable(true)
+            .polygon_mode(vk::PolygonMode::FILL)
+            .cull_mode(vk::CullModeFlags::BACK)
+            .line_width(1.0),
         vert_module,
         frag_module,
     )?;
@@ -292,12 +303,8 @@ fn main() -> anyhow::Result<()> {
         }
 
         let keyboard_state = event_pump.keyboard_state();
-        let mouse_state = event_pump.mouse_state();
-        //camera.update(
-        //    &keyboard_state,
-        //    &mouse_state,
-        //    delta_time.as_secs_f32(),
-        //);
+        let mouse_state = event_pump.relative_mouse_state();
+        camera.update(&keyboard_state, &mouse_state, delta_time.as_secs_f32());
 
         if resized {
             log::info!("Resizing");
