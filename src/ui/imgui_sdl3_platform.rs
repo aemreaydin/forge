@@ -247,23 +247,18 @@ impl ImguiSdlPlatform {
 
         let (mut width, mut height) = window.size();
         let (d_width, d_height) = window.size_in_pixels();
-        let density = window.pixel_density();
-
-        log::info!("Window Size: ({}, {})", width, height);
-        log::info!("Window Drawable Size: ({}, {})", d_width, d_height);
-        log::info!("Window Pixel Density: ({})", density);
 
         if window.is_minimized() {
             width = 0;
             height = 0;
         }
+
         if width > 0 && height > 0 {
             io.display_framebuffer_scale = [
                 d_width as f32 / width as f32,
                 d_height as f32 / height as f32,
             ];
         }
-
         imgui_ctx.io_mut().display_size = [width as f32, height as f32];
 
         Ok(())

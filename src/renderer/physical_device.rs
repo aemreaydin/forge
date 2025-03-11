@@ -71,7 +71,6 @@ impl PhysicalDevice {
             }
             _ => Err(anyhow!("no suitable physical devices found")),
         }?;
-        log::info!("{:?}", queue_indices);
         unsafe {
             Ok(Self {
                 physical_device,

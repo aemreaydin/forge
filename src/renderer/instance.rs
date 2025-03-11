@@ -3,19 +3,19 @@ use ash::{vk, Entry};
 use std::ffi::CStr;
 
 const VALIDATION_LAYER: &CStr = c"VK_LAYER_KHRONOS_validation";
-const OPTIONAL_INSTANCE_LAYERS: &[&std::ffi::CStr] = &[c"VK_LAYER_KHRONOS_shader_object"];
+const OPTIONAL_INSTANCE_LAYERS: &[&CStr] = &[c"VK_LAYER_KHRONOS_shader_object"];
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
-const REQUIRED_INSTANCE_EXTENSIONS: &[&std::ffi::CStr] = &[
+const REQUIRED_INSTANCE_EXTENSIONS: &[&CStr] = &[
     ash::vk::EXT_METAL_SURFACE_NAME,
     ash::khr::portability_enumeration::NAME,
     ash::khr::get_physical_device_properties2::NAME,
     ash::mvk::macos_surface::NAME,
 ];
 #[cfg(target_os = "linux")]
-const REQUIRED_INSTANCE_EXTENSIONS: &[&std::ffi::CStr] = &[ash::khr::xlib_surface::NAME];
+const REQUIRED_INSTANCE_EXTENSIONS: &[&CStr] = &[ash::khr::xlib_surface::NAME];
 #[cfg(target_os = "windows")]
-const REQUIRED_INSTANCE_EXTENSIONS: &[&std::ffi::CStr] = &[ash::khr::win32_surface::NAME];
+const REQUIRED_INSTANCE_EXTENSIONS: &[&CStr] = &[ash::khr::win32_surface::NAME];
 
 pub struct DebugUtils {
     debug_utils_messenger: vk::DebugUtilsMessengerEXT,

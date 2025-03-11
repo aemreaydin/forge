@@ -73,8 +73,8 @@ fn main() -> anyhow::Result<()> {
     let video_subsystem = sdl_context.video().unwrap();
     let window = video_subsystem
         .window("forge", 1920, 1080)
+        .set_window_flags(sdl3::sys::video::SDL_WINDOW_HIGH_PIXEL_DENSITY as u32)
         .position_centered()
-        // .fullscreen()
         .vulkan()
         .resizable()
         .build()?;
@@ -559,9 +559,10 @@ fn main() -> anyhow::Result<()> {
                 image_index,
             )?;
             imgui_renderer.draw(|ui| {
+                ui.dockspace_over_main_viewport();
                 if let Some(wnd) = ui
                     .window("Forge")
-                    .size([300.0, 400.0], imgui::Condition::FirstUseEver)
+                    .size([400.0, 400.0], imgui::Condition::FirstUseEver)
                     .begin()
                 {
                     ui.slider("Camera Zoom Speed", 1.0, 20.0, &mut camera.camera_speed);
