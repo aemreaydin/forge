@@ -197,6 +197,7 @@ impl Instance {
                 .map(|layer| CStr::from_ptr(layer.layer_name.as_ptr()))
                 .collect::<Vec<_>>()
         };
+
         let layers = {
             OPTIONAL_INSTANCE_LAYERS
                 .iter()
@@ -205,6 +206,7 @@ impl Instance {
                         log::info!("Adding optional layer {}.", layer.to_string_lossy());
                         Some(layer.as_ptr())
                     } else {
+                        log::warn!("Optional layer {} not found.", layer.to_string_lossy());
                         None
                     }
                 })

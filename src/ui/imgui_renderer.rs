@@ -122,6 +122,7 @@ impl ImguiVulkanRenderer {
                 .polygon_mode(vk::PolygonMode::FILL)
                 .line_width(1.0)
                 .cull_mode(vk::CullModeFlags::NONE),
+            &[],
             vert_module,
             frag_module,
         )?;

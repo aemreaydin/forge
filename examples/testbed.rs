@@ -5,6 +5,7 @@ use ash::{
 };
 use forge::{
     assets::{AssetRegistry, AssetType},
+    buffer::Vertex,
     camera::fly_camera::FlyCamera,
     load_image,
     renderer::{
@@ -81,6 +82,7 @@ fn main() -> anyhow::Result<()> {
     video_subsystem.text_input().start(&window);
 
     let mouse = sdl_context.mouse();
+    mouse.set_relative_mouse_mode(&window, true);
 
     let asset_registry = AssetRegistry::new();
 
@@ -106,13 +108,13 @@ fn main() -> anyhow::Result<()> {
         .offset(0)
         .size(size_of::<nalgebra_glm::Mat4>() as u32)];
     let bindings = &[
+        // vk::DescriptorSetLayoutBinding::default()
+        //     .binding(0)
+        //     .descriptor_count(1)
+        //     .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+        //     .stage_flags(vk::ShaderStageFlags::VERTEX),
         vk::DescriptorSetLayoutBinding::default()
             .binding(0)
-            .descriptor_count(1)
-            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-            .stage_flags(vk::ShaderStageFlags::VERTEX),
-        vk::DescriptorSetLayoutBinding::default()
-            .binding(1)
             .descriptor_count(1)
             .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
             .stage_flags(vk::ShaderStageFlags::FRAGMENT),
@@ -133,6 +135,26 @@ fn main() -> anyhow::Result<()> {
     let frag_module =
         forge::create_shader_module(vulkan_context.device(), "shaders/triangle.frag.spv")?;
 
+    let binding_descs = &[vk::VertexInputBindingDescription::default()
+        .stride(size_of::<Vertex>() as u32)
+        .input_rate(vk::VertexInputRate::VERTEX)];
+    let attribute_descs = &[
+        vk::VertexInputAttributeDescription::default()
+            .location(0)
+            .binding(binding_descs[0].binding)
+            .format(vk::Format::R32G32B32A32_SFLOAT)
+            .offset(std::mem::offset_of!(Vertex, position) as u32),
+        vk::VertexInputAttributeDescription::default()
+            .location(1)
+            .binding(binding_descs[0].binding)
+            .format(vk::Format::R32G32B32A32_SFLOAT)
+            .offset(std::mem::offset_of!(Vertex, normal) as u32),
+        vk::VertexInputAttributeDescription::default()
+            .location(2)
+            .binding(binding_descs[0].binding)
+            .format(vk::Format::R32G32_SFLOAT)
+            .offset(std::mem::offset_of!(Vertex, tex_coords) as u32),
+    ];
     let graphics_pipeline = forge::create_graphics_pipeline(
         vulkan_context.device(),
         render_pass,
@@ -144,13 +166,16 @@ fn main() -> anyhow::Result<()> {
             .depth_compare_op(vk::CompareOp::LESS)
             .front(vk::StencilOpState::default().compare_op(vk::CompareOp::ALWAYS))
             .back(vk::StencilOpState::default().compare_op(vk::CompareOp::ALWAYS)),
-        vk::PipelineVertexInputStateCreateInfo::default(),
+        vk::PipelineVertexInputStateCreateInfo::default()
+            .vertex_attribute_descriptions(attribute_descs)
+            .vertex_binding_descriptions(binding_descs),
         vk::PipelineRasterizationStateCreateInfo::default()
             .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
             .depth_bias_enable(true)
             .polygon_mode(vk::PolygonMode::FILL)
             .cull_mode(vk::CullModeFlags::BACK)
             .line_width(1.0),
+        &[],
         vert_module,
         frag_module,
     )?;
@@ -177,33 +202,33 @@ fn main() -> anyhow::Result<()> {
             .allocate_command_buffers(&command_buffer_allocate_info)?
     };
 
-    // let (vert_shader, frag_shader) = {
-    //     log::info!("Using Shader Object");
-    //     let push_constant_ranges = &[vk::PushConstantRange::default()
-    //         .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
-    //         .offset(0)
-    //         .size(size_of::<nalgebra_glm::Mat4>() as u32)];
-    //     let vert_shader = ShaderObject::new(
-    //         vulkan_context.instance(),
-    //         vulkan_context.device(),
-    //         c"main",
-    //         vk::ShaderStageFlags::VERTEX,
-    //         &forge::load_shader::<_, u8>("shaders/triangle.vert.spv")?,
-    //         &[descriptor_set_layout],
-    //         push_constant_ranges,
-    //     )?;
-    //     let frag_shader = ShaderObject::new(
-    //         vulkan_context.instance(),
-    //         vulkan_context.device(),
-    //         c"main",
-    //         vk::ShaderStageFlags::FRAGMENT,
-    //         &forge::load_shader::<_, u8>("shaders/triangle.frag.spv")?,
-    //         &[descriptor_set_layout],
-    //         push_constant_ranges,
-    //     )?;
-    //
-    //     (vert_shader, frag_shader)
-    // };
+    let (vert_shader, frag_shader) = {
+        log::info!("Using Shader Object");
+        let push_constant_ranges = &[vk::PushConstantRange::default()
+            .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
+            .offset(0)
+            .size(size_of::<nalgebra_glm::Mat4>() as u32)];
+        let vert_shader = ShaderObject::new(
+            vulkan_context.instance(),
+            vulkan_context.device(),
+            c"main",
+            vk::ShaderStageFlags::VERTEX,
+            &forge::load_shader::<_, u8>("shaders/triangle.vert.spv")?,
+            &[descriptor_set_layout],
+            push_constant_ranges,
+        )?;
+        let frag_shader = ShaderObject::new(
+            vulkan_context.instance(),
+            vulkan_context.device(),
+            c"main",
+            vk::ShaderStageFlags::FRAGMENT,
+            &forge::load_shader::<_, u8>("shaders/triangle.frag.spv")?,
+            &[descriptor_set_layout],
+            push_constant_ranges,
+        )?;
+
+        (vert_shader, frag_shader)
+    };
 
     let mut depth_image =
         create_depth_resources(&vulkan_context, vk::MemoryPropertyFlags::DEVICE_LOCAL)?;
@@ -292,6 +317,15 @@ fn main() -> anyhow::Result<()> {
                     keycode: Some(Keycode::Escape),
                     ..
                 } => break 'main_loop,
+                Event::KeyDown { keycode, .. } => match keycode {
+                    Some(Keycode::Tab) => {
+                        mouse.set_relative_mouse_mode(&window, !mouse.relative_mouse_mode(&window))
+                    }
+                    Some(Keycode::Kp0) => {
+                        log::info!("0 is pressed")
+                    }
+                    _ => {}
+                },
                 Event::Window {
                     win_event: WindowEvent::Resized(..),
                     ..
@@ -424,26 +458,26 @@ fn main() -> anyhow::Result<()> {
                 .device()
                 .cmd_set_scissor(command_buffer, 0, scissors);
 
-            let color_attachments = &[vk::RenderingAttachmentInfo::default()
-                .image_view(vulkan_context.swapchain().image_view(image_index))
-                .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                .load_op(vk::AttachmentLoadOp::CLEAR)
-                .store_op(vk::AttachmentStoreOp::STORE)
-                .clear_value(clear_values[0])];
-            let depth_attachment = vk::RenderingAttachmentInfo::default()
-                .image_view(depth_image.image_view)
-                .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
-                .load_op(vk::AttachmentLoadOp::CLEAR)
-                .store_op(vk::AttachmentStoreOp::STORE)
-                .clear_value(clear_values[1]);
-            let rendering_info = vk::RenderingInfo::default()
-                .render_area(vk::Rect2D {
-                    offset: vk::Offset2D { x: 0, y: 0 },
-                    extent: vulkan_context.swapchain_extent(),
-                })
-                .layer_count(1)
-                .color_attachments(color_attachments)
-                .depth_attachment(&depth_attachment);
+            // let color_attachments = &[vk::RenderingAttachmentInfo::default()
+            //     .image_view(vulkan_context.swapchain().image_view(image_index))
+            //     .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+            //     .load_op(vk::AttachmentLoadOp::CLEAR)
+            //     .store_op(vk::AttachmentStoreOp::STORE)
+            //     .clear_value(clear_values[0])];
+            // let depth_attachment = vk::RenderingAttachmentInfo::default()
+            //     .image_view(depth_image.image_view)
+            //     .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+            //     .load_op(vk::AttachmentLoadOp::CLEAR)
+            //     .store_op(vk::AttachmentStoreOp::STORE)
+            //     .clear_value(clear_values[1]);
+            // let rendering_info = vk::RenderingInfo::default()
+            //     .render_area(vk::Rect2D {
+            //         offset: vk::Offset2D { x: 0, y: 0 },
+            //         extent: vulkan_context.swapchain_extent(),
+            //     })
+            //     .layer_count(1)
+            //     .color_attachments(color_attachments)
+            //     .depth_attachment(&depth_attachment);
 
             let render_pass_begin = vk::RenderPassBeginInfo::default()
                 .render_pass(render_pass)
@@ -493,32 +527,27 @@ fn main() -> anyhow::Result<()> {
 
                 if cube_model.visible {
                     cube_model.meshes.iter().for_each(|mesh| {
-                        let buffer_info = &[vk::DescriptorBufferInfo::default()
-                            .buffer(mesh.vertex_buffer.buffer)
-                            .offset(0)
-                            .range(mesh.vertex_buffer.size)];
                         let image_info = &[vk::DescriptorImageInfo::default()
                             .image_view(cube_texture.image.image_view)
                             .sampler(cube_sampler)
                             .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
-                        let descriptor_writes = &[
-                            vk::WriteDescriptorSet::default()
-                                .descriptor_count(1)
-                                .dst_binding(0)
-                                .buffer_info(buffer_info)
-                                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER),
-                            vk::WriteDescriptorSet::default()
-                                .descriptor_count(1)
-                                .dst_binding(1)
-                                .image_info(image_info)
-                                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER),
-                        ];
+                        let descriptor_writes = &[vk::WriteDescriptorSet::default()
+                            .descriptor_count(1)
+                            .dst_binding(0)
+                            .image_info(image_info)
+                            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)];
                         push_desc_loader.cmd_push_descriptor_set(
                             command_buffer,
                             vk::PipelineBindPoint::GRAPHICS,
                             pipeline_layout,
                             0,
                             descriptor_writes,
+                        );
+                        vulkan_context.device().cmd_bind_vertex_buffers(
+                            command_buffer,
+                            0,
+                            &[mesh.vertex_buffer.buffer],
+                            &[0],
                         );
                         vulkan_context.device().cmd_bind_index_buffer(
                             command_buffer,
@@ -642,8 +671,8 @@ fn main() -> anyhow::Result<()> {
         vulkan_context
             .device()
             .destroy_pipeline(graphics_pipeline, None);
-        // vert_shader.destroy();
-        // frag_shader.destroy();
+        vert_shader.destroy();
+        frag_shader.destroy();
 
         vulkan_context
             .device()

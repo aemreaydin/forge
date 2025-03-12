@@ -24,7 +24,7 @@ impl Mesh {
             &vulkan_context.physical_device,
             vulkan_context.device(),
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-            vk::BufferUsageFlags::STORAGE_BUFFER,
+            vk::BufferUsageFlags::VERTEX_BUFFER,
             &vertices,
         )?;
         let index_buffer = Buffer::from_data(

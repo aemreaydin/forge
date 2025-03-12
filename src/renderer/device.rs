@@ -25,7 +25,6 @@ pub struct DeviceSupport {
 
 pub struct Device {
     pub device: ash::Device,
-    pub device_support: DeviceSupport,
 
     pub graphics_queue: vk::Queue,
     pub compute_queue: vk::Queue,
@@ -67,40 +66,19 @@ impl Device {
                 .queue_priorities(&[1.0]),
             ];
 
-            let mut push_descriptor_props =
-                vk::PhysicalDevicePushDescriptorPropertiesKHR::default();
-            let mut physical_device_props =
-                vk::PhysicalDeviceProperties2::default().push_next(&mut push_descriptor_props);
-            instance.get_physical_device_properties2(
-                physical_device.physical_device,
-                &mut physical_device_props,
-            );
-
             let mut shader_object =
                 vk::PhysicalDeviceShaderObjectFeaturesEXT::default().shader_object(true);
             let mut dynamic_rendering =
                 vk::PhysicalDeviceDynamicRenderingFeaturesKHR::default().dynamic_rendering(true);
-            let mut physical_device_features = vk::PhysicalDeviceFeatures2::default()
-                .features(vk::PhysicalDeviceFeatures::default())
-                .push_next(&mut dynamic_rendering)
-                .push_next(&mut shader_object);
-
-            let device_support = DeviceSupport::default();
-            // optional_extensions.iter().for_each(|&ext| match ext {
-            //     val if { CStr::from_ptr(val) } == ext::shader_object::NAME => {
-            //         device_support.shader_ext = shader_object.shader_object != 0;
-            //     }
-            //     val if { CStr::from_ptr(val) } == ash::khr::dynamic_rendering::NAME => {
-            //         log::info!("Supporting dynamic_rendering");
-            //         device_support.dynamic_rendering = dynamic_rendering.dynamic_rendering != 0;
-            //     }
-            //     _ => {}
-            // });
+            let physical_device_features = vk::PhysicalDeviceFeatures2::default()
+                .features(vk::PhysicalDeviceFeatures::default());
 
             let create_info = vk::DeviceCreateInfo::default()
                 .queue_create_infos(&queue_create_infos)
                 .enabled_extension_names(&extensions)
-                .push_next(&mut physical_device_features);
+                .enabled_features(&physical_device_features.features)
+                .push_next(&mut dynamic_rendering)
+                .push_next(&mut shader_object);
             let device =
                 instance.create_device(physical_device.physical_device, &create_info, None)?;
 
@@ -116,7 +94,6 @@ impl Device {
             )?;
             Ok(Self {
                 device,
-                device_support,
 
                 graphics_queue,
                 compute_queue,

@@ -12,6 +12,39 @@ pub struct Vertex {
     pub _padding: nalgebra_glm::Vec2, // TODO: There has to be a way to do this without padding
 }
 
+impl Vertex {
+    pub fn vertex_input_binding_desc2() -> Vec<vk::VertexInputBindingDescription2EXT<'static>> {
+        vec![vk::VertexInputBindingDescription2EXT {
+            input_rate: vk::VertexInputRate::VERTEX,
+            divisor: 1,
+            stride: size_of::<Vertex>() as u32,
+            binding: 0,
+            ..Default::default()
+        }]
+    }
+    pub fn vertex_input_attribute_desc2() -> Vec<vk::VertexInputAttributeDescription2EXT<'static>> {
+        vec![
+            vk::VertexInputAttributeDescription2EXT::default()
+                .location(0)
+                .binding(0)
+                .format(vk::Format::R32G32B32A32_SFLOAT)
+                .offset(std::mem::offset_of!(Vertex, position) as u32),
+            vk::VertexInputAttributeDescription2EXT::default()
+                .location(1)
+                .binding(0)
+                .format(vk::Format::R32G32B32A32_SFLOAT)
+                .offset(std::mem::offset_of!(Vertex, normal) as u32),
+            vk::VertexInputAttributeDescription2EXT::default()
+                .location(2)
+                .binding(0)
+                .format(vk::Format::R32G32_SFLOAT)
+                .offset(std::mem::offset_of!(Vertex, tex_coords) as u32),
+        ]
+    }
+    //     vertex_input_descs: &[vk::VertexInputBindingDescription2EXT<'_>],
+    // vertex_atturibute_descs: &[vk::VertexInputAttributeDescription2EXT<'_>],
+}
+
 impl Default for Vertex {
     fn default() -> Self {
         Self {

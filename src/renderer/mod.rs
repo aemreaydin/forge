@@ -274,6 +274,7 @@ pub fn create_graphics_pipeline(
     depth_stencil_state: vk::PipelineDepthStencilStateCreateInfo,
     vertex_state: vk::PipelineVertexInputStateCreateInfo,
     rasterization_state: vk::PipelineRasterizationStateCreateInfo,
+    dynamic_state: &[vk::DynamicState],
     vert_module: vk::ShaderModule,
     frag_module: vk::ShaderModule,
 ) -> anyhow::Result<vk::Pipeline> {
@@ -315,8 +316,12 @@ pub fn create_graphics_pipeline(
         .viewport_count(1)
         .scissor_count(1);
 
-    let dyn_states = &[vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
-    let dynamic_state = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(dyn_states);
+    let mut dyn_states = vec![vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+    dyn_states.extend_from_slice(dynamic_state);
+    dyn_states.sort();
+    dyn_states.dedup();
+
+    let dynamic_state = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dyn_states);
     let create_info = vk::GraphicsPipelineCreateInfo::default()
         .stages(stages)
         .vertex_input_state(&vertex_state)

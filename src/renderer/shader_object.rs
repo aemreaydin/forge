@@ -85,6 +85,7 @@ impl ShaderObject {
                     .dst_color_blend_factor(vk::BlendFactor::ZERO)
                     .color_blend_op(vk::BlendOp::ADD)],
             );
+            device_fns.cmd_set_patch_control_points(command_buffer, 0);
             device_fns
                 .cmd_set_primitive_topology(command_buffer, vk::PrimitiveTopology::TRIANGLE_LIST);
         }
@@ -101,6 +102,23 @@ impl ShaderObject {
                 vertex_input_descs,
                 vertex_atturibute_descs,
             )
+        }
+    }
+
+    pub fn bind_vertex_buffers(
+        command_buffer: vk::CommandBuffer,
+        buffers: &[vk::Buffer],
+        offsets: &[vk::DeviceSize],
+    ) {
+        unsafe {
+            Self::get_device_fns().cmd_bind_vertex_buffers2(
+                command_buffer,
+                0,
+                buffers,
+                offsets,
+                None,
+                None,
+            );
         }
     }
 
